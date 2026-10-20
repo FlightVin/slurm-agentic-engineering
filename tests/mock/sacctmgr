@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# MOCK sacctmgr: no-op
+exit 0

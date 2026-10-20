@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# MOCK sacct: answers from the mock job table for -j ids, honouring -o field order.
+S="$MOCK_SLURM"; ids=""; fmt="JobID,State"
+while [ $# -gt 0 ]; do case "$1" in -j) ids="$2"; shift 2;; -o) fmt="$2"; shift 2;; *) shift;; esac; done
+ids=${ids//\'/}
+[ -f "$S/jobs" ] || exit 0
+while IFS='|' read -r id name st ec; do
+  case ",$ids," in *",$id,"*) ;; *) continue;; esac
+  out=""; IFS=, read -ra F <<<"$fmt"
+  for f in "${F[@]}"; do f=${f%%%*}
+    case "$f" in JobID) v=$id;; JobName) v=$name;; State) v=$st;; ExitCode) v=$ec;; *) v="";; esac
+    out="${out:+$out|}$v"; done
+  echo "$out"
+done < "$S/jobs"

@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Emit one line per STATE CHANGE for the v4 experiments, and exit when none is live.
+#
+# PROJECT.md 0 requires every task run to be tracked by a script that reports back when
+# something salient happens, with a monitor and a timeout. This is that script. It is a
+# LAPTOP-SIDE poller invoked by the orchestrator -- not a cluster-side daemon, which
+# CLAUDE.md forbids and a previous attempt at this project failed on.
+#
+# Coverage note: it emits on EVERY terminal state, not only COMPLETED. A watcher that
+# greps for success alone is silent through a failure, and silence is indistinguishable
+# from "still running".
+#
+# PORTABILITY: no associative arrays. The orchestrator runs on macOS, whose /bin/bash is
+# 3.2, where `declare -A` does not exist -- the first version of this script died on it
+# immediately. The seen-state map is a temp file instead.
+#
+#   v4-watch [interval_seconds] [max_seconds]
+#
+# Exit 0  every v4 experiment reached a terminal state, all COMPLETED
+# Exit 1  the time limit was reached with something still live  (the TIMEOUT half)
+# Exit 2  at least one v4 experiment ended in a non-COMPLETED terminal state
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+AE="$ROOT/agentic-engineering/bin/ae"
+INTERVAL="${1:-120}"
+MAX="${2:-86400}"
+PREFIX="${V4_PREFIX:-v4-}"
+
+# PERSISTENT across invocations, on purpose. With a fresh temp file every run, each
+# re-arm of the monitor re-reported all fifteen experiments as if they had just changed
+# -- fifteen spurious events per re-arm, which is exactly the noise that trains a reader
+# to stop looking. State survives in the scratchpad; `V4_WATCH_STATE=` to a fresh path
+# resets it deliberately.
+SEEN="${V4_WATCH_STATE:-${TMPDIR:-/tmp}/v4watch-${PREFIX}state}"
+mkdir -p "$(dirname "$SEEN")" 2>/dev/null || true
+touch "$SEEN"
+started=$(date +%s)
+
+while :; do
+    # One ssh round trip per poll. `ae status` already batches its sacct/squeue calls
+    # (H9), so this stays O(1) in the number of experiments rather than O(n).
+    snapshot="$("$AE" status 2>/dev/null | awk -v p="^$PREFIX" '$1 ~ p {print $1, $2}')"
+
+    if [ -z "$snapshot" ]; then
+        echo "$(date -u +%H:%M:%SZ) no experiment matching ${PREFIX}* in the ledger yet"
+    fi
+
+    live=0
+    bad=0
+    while read -r id state; do
+        [ -z "${id:-}" ] && continue
+        previous="$(awk -v k="$id" '$1 == k {print $2}' "$SEEN")"
+        if [ "$previous" != "$state" ]; then
+            echo "$(date -u +%H:%M:%SZ) $id -> $state"
+            grep -v "^$id " "$SEEN" > "$SEEN.new" 2>/dev/null || true
+            mv "$SEEN.new" "$SEEN"
+            echo "$id $state" >> "$SEEN"
+        fi
+        case "$state" in
+            PENDING|RUNNING|CONFIGURING|COMPLETING|REQUEUED|RESIZING|SUSPENDED)
+                live=1 ;;
+            COMPLETED)
+                ;;
+            *)
+                # FAILED, CANCELLED, TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, BADLEDGER, or
+                # anything else this harness can print. All salient.
+                bad=1 ;;
+        esac
+    done <<EOF
+$snapshot
+EOF
+
+    if [ "$live" -eq 0 ] && [ -n "$snapshot" ]; then
+        if [ "$bad" -eq 1 ]; then
+            echo "$(date -u +%H:%M:%SZ) DONE with FAILURES among ${PREFIX}* -- investigate"
+            exit 2
+        fi
+        echo "$(date -u +%H:%M:%SZ) DONE all ${PREFIX}* experiments COMPLETED"
+        exit 0
+    fi
+
+    now=$(date +%s)
+    if [ $((now - started)) -ge "$MAX" ]; then
+        echo "$(date -u +%H:%M:%SZ) TIMEOUT after ${MAX}s with work still live -- investigate"
+        exit 1
+    fi
+    sleep "$INTERVAL"
+done

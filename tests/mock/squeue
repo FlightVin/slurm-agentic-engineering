@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# MOCK squeue: jobs run synchronously, so nothing is ever queued.
+exit 0

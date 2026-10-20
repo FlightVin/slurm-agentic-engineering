@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# MOCK du: BSD du has no --apparent-size; drop it.
+a=(); for x in "$@"; do [ "$x" = "--apparent-size" ] || a+=("$x"); done; exec /usr/bin/du "${a[@]}"

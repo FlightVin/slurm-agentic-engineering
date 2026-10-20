@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Read", "Write", "Edit", "Glob", "Grep", "TodoWrite",
+      "Bash(git status:*)", "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)",
+      "Bash(git add:*)", "Bash(git commit:*)", "Bash(git push {{REMOTE}} HEAD:*)",
+      "Bash(git rev-parse:*)", "Bash(git branch:*)", "Bash(git checkout -- :*)",
+      "Bash(ls:*)", "Bash(cat:*)", "Bash(head:*)", "Bash(tail:*)", "Bash(wc:*)",
+      "Bash(grep:*)", "Bash(find:*)", "Bash(mkdir:*)", "Bash(cp:*)", "Bash(mv:*)",
+      "Bash(echo:*)", "Bash(printf:*)", "Bash(sed:*)", "Bash(awk:*)", "Bash(diff:*)",
+      "Bash(python:*)", "Bash(python3:*)", "Bash(pytest:*)", "Bash(bash:*)",
+      "Bash(hostname:*)", "Bash(printenv:*)", "Bash(env:*)", "Bash(nvidia-smi:*)",
+      "Bash(squeue:*)", "Bash(sacct:*)"
+    ],
+    "deny": [
+      "Bash(sbatch:*)", "Bash(scancel:*)", "Bash(srun:*)", "Bash(salloc:*)",
+      "Bash(git push {{REMOTE}} {{AUTH_BRANCH}}:*)", "Bash(git push {{REMOTE}} HEAD:{{AUTH_BRANCH}}:*)",
+      "Bash(git push {{REMOTE}} HEAD:refs/heads/{{AUTH_BRANCH}}:*)",
+      "Bash(git push {{REMOTE}} main:*)", "Bash(git push {{REMOTE}} HEAD:main:*)",
+      "Bash(git push {{REMOTE}} master:*)", "Bash(git push {{REMOTE}} HEAD:master:*)",
+      "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(git reset --hard:*)",
+      "Bash(rm -rf:*)", "Bash(ssh:*)", "Bash(scp:*)"
+    ]
+  }
+}

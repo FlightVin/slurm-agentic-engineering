@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# MOCK scontrol: no-op
+exit 0

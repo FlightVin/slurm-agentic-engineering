@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Block until ANY v4 experiment stops being PENDING, then exit and report which.
+#
+# A Monitor expires after 30 minutes and has to be re-armed, which on a queue measured
+# in hours means dozens of empty wake-ups. PROJECT.md 0 asks for the opposite: "spawn
+# shells to poll the remote compute or task runs without wasting tokens". This is one
+# detached shell that sleeps, polls, and exits exactly once -- when there is something
+# to say.
+#
+# Exit 0  something started or finished; the line printed says what
+# Exit 1  the deadline passed with everything still PENDING
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+AE="$ROOT/agentic-engineering/bin/ae"
+INTERVAL="${1:-600}"
+DEADLINE="${2:-86400}"
+PREFIX="${V4_PREFIX:-v4-}"
+
+started=$(date +%s)
+while :; do
+    # Anything that is NOT pending is worth waking for: RUNNING is progress, and
+    # FAILED/TIMEOUT/CANCELLED is progress of a kind that matters more.
+    moved="$("$AE" status 2>/dev/null \
+             | awk -v p="^$PREFIX" '$1 ~ p && $2 != "PENDING" {print $1, $2}')"
+    if [ -n "$moved" ]; then
+        echo "$(date -u +%H:%M:%SZ) MOVED:"
+        echo "$moved"
+        exit 0
+    fi
+    now=$(date +%s)
+    if [ $((now - started)) -ge "$DEADLINE" ]; then
+        echo "$(date -u +%H:%M:%SZ) still entirely PENDING after ${DEADLINE}s"
+        exit 1
+    fi
+    sleep "$INTERVAL"
+done

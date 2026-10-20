@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Block until the NAMED experiments all reach a terminal state, then print each.
+#
+#   v4-await [--interval N] [--deadline N] <expid> [expid ...]
+#
+# `v4-wait-for-start` answers "has anything moved", which is the wrong question once
+# some jobs are already terminal -- it fires instantly on the old ones. This answers
+# "are THESE done", which is what you want after a resubmit.
+#
+# Exit 0  all named experiments COMPLETED
+# Exit 2  all terminal, at least one not COMPLETED
+# Exit 1  the deadline passed with something still live
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+AE="$ROOT/agentic-engineering/bin/ae"
+INTERVAL=120
+DEADLINE=21600
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --interval) INTERVAL="$2"; shift 2 ;;
+        --deadline) DEADLINE="$2"; shift 2 ;;
+        *) break ;;
+    esac
+done
+[ $# -gt 0 ] || { echo "usage: v4-await [--interval N] [--deadline N] <expid>..."; exit 64; }
+WANTED="$*"
+
+started=$(date +%s)
+while :; do
+    snapshot="$("$AE" status 2>/dev/null)"
+    live=0; bad=0; report=""
+    for id in $WANTED; do
+        state="$(echo "$snapshot" | awk -v k="$id" '$1 == k {print $2; exit}')"
+        [ -z "$state" ] && state="UNKNOWN"
+        report="$report$id $state"$'\n'
+        case "$state" in
+            COMPLETED) ;;
+            PENDING|RUNNING|CONFIGURING|COMPLETING|REQUEUED|RESIZING|SUSPENDED|UNKNOWN)
+                live=1 ;;
+            *) bad=1 ;;
+        esac
+    done
+    if [ "$live" -eq 0 ]; then
+        printf '%s' "$report"
+        [ "$bad" -eq 1 ] && exit 2 || exit 0
+    fi
+    now=$(date +%s)
+    if [ $((now - started)) -ge "$DEADLINE" ]; then
+        echo "TIMEOUT after ${DEADLINE}s; current states:"
+        printf '%s' "$report"
+        exit 1
+    fi
+    sleep "$INTERVAL"
+done

@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# v6-dev -- the development loop for naive poker v6.
+#
+#   v6-dev [--gpu|--gen|--job JOBID] [--timeout SECS] [--lines N] -- <shell command>
+#   (--job: overlap a named RUNNING allocation of yours when no standby is up)
+#
+# rsyncs the laptop working tree (no .git) to $HOME/ae/dev/wllms on the cluster,
+# then runs <command> from that directory INSIDE the oldest running standby
+# allocation (srun --overlap), never on the login node. Output is truncated to the
+# last N lines (default 60) so a noisy command cannot flood the orchestrator.
+# The full output is kept remotely in $HOME/ae/dev/last.log.
+#
+# This is for tests and small pilots only. Anything that must be reproducible is
+# an `ae submit` experiment pinned to a commit.
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")/.." && pwd)"; REPO="$(cd "$HERE/.." && pwd)"
+TIER=cpu; TMO=900; LINES=60; JOB=""
+DDIR="${V6_DEV_DIR:-ae/dev/wllms}"   # per-agent remote copy; set V6_DEV_DIR to isolate
+while [ $# -gt 0 ]; do case "$1" in
+  --gpu) TIER=gpu; shift;; --gen) TIER=gen; shift;; --job) JOB="$2"; shift 2;;
+  --timeout) TMO="$2"; shift 2;; --lines) LINES="$2"; shift 2;;
+  --) shift; break;; *) break;; esac; done
+[ $# -gt 0 ] || { echo "usage: v6-dev [--gpu|--gen] [--timeout S] [--lines N] -- cmd" >&2; exit 2; }
+CMD="$*"
+CMDF=".dev_cmd.$(basename "$DDIR").sh"
+printf '%s\n' "$CMD" > "$HERE/$CMDF"
+ssh -n -o BatchMode=yes babel "mkdir -p $DDIR"
+rsync -az --delete --exclude .git --exclude __pycache__ --exclude '*.pyc' \
+  --exclude 'agentic-engineering/results' --exclude 'agentic-engineering/inv' \
+  "$REPO/" babel:$DDIR/ || { echo "v6-dev: rsync failed" >&2; exit 3; }
+case $TIER in
+  cpu) NAME=ae-dbg-cpu;; gpu) NAME=ae-dbg;; gen) NAME=ae-dbg-gen;; esac
+J="$JOB"; [ -n "$J" ] || J=$(ssh -n -o BatchMode=yes babel "squeue -h -u \$USER -n $NAME -t R -o '%M %i' | sort -r | head -1 | awk '{print \$2}'")
+[ -n "$J" ] || { echo "v6-dev: no RUNNING $NAME standby; run ae pool" >&2; exit 4; }
+ssh -n -o BatchMode=yes babel "cd $DDIR && timeout $TMO srun --jobid=$J --overlap bash -lc \
+ 'export PYTHONPATH=\$HOME/$DDIR:/data/user_data/vineethb/envs/v6extra; export PATH=/data/user_data/vineethb/envs/wllms/bin:\$PATH; export PYTHONDONTWRITEBYTECODE=1; export NUMBA_CACHE_DIR=/tmp/numba-\$USER; bash agentic-engineering/$CMDF' > \$HOME/$DDIR.last.log 2>&1; rc=\$?; tail -n $LINES \$HOME/$DDIR.last.log; echo \"[v6-dev rc=\$rc job=$J]\"; exit \$rc"

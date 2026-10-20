@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# v7-watch -- bounded, change-based monitor for one or more ae experiments (v7).
+#
+#   v7-watch [--timeout S] [--interval S] [--stall S] EXPID [EXPID ...]
+#
+# Every --interval seconds (default 300) it asks Slurm (sacct/squeue, the source of truth)
+# about the ledger's job for each EXPID and reads the LAST metrics line of each running job's
+# log (bounded tail; the log lives under ~/ae/out on the login-visible filesystem). It prints
+# ONE line per job only when something changed: state, restart count, or >= 5% more progress
+# (step/budget, loss, tokens/s). Error lines (Traceback/Error/NaN) newly seen in the tail are
+# printed once (first 3). It EXITS with a reason as soon as:
+#   DONE     all watched jobs reached a terminal state
+#   FAILED   any job ended FAILED/CANCELLED/TIMEOUT/OUT_OF_MEMORY/NODE_FAIL
+#   STALL    a RUNNING job's log did not grow for --stall seconds (default 2700)
+#   TIMEOUT  --timeout seconds elapsed (default 10800)
+# HELD jobs ("launch failed requeued held") are released once. Exit: 0 DONE, 1 FAILED,
+# 2 STALL, 3 TIMEOUT. No daemon: it ends by itself.
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+LEDGER="$HERE/state/LEDGER.jsonl"
+TMO=10800; IV=300; STALL=2700
+while [ $# -gt 0 ]; do case "$1" in
+  --timeout) TMO=$2; shift 2;; --interval) IV=$2; shift 2;; --stall) STALL=$2; shift 2;;
+  *) break;; esac; done
+[ $# -gt 0 ] || { echo "usage: v7-watch [--timeout S] [--interval S] [--stall S] EXPID..."; exit 4; }
+declare -a EXPS=("$@") JOBS=()
+for e in "${EXPS[@]}"; do
+  j=$(grep "\"expid\": *\"$e\"" "$LEDGER" | tail -1 | sed 's/.*"jobid": *"\([^"]*\)".*/\1/')
+  [ -n "$j" ] || { echo "v7-watch: no ledger job for $e"; exit 4; }
+  JOBS+=("$j")
+done
+t0=$(date +%s)
+released=""
+declare -a LASTSZ LASTGROW LASTRS LASTST LASTPROG LASTERR
+for i in "${!JOBS[@]}"; do LASTSZ[$i]=-1; LASTGROW[$i]=$t0; LASTRS[$i]=0; LASTST[$i]=""; LASTPROG[$i]=-1; LASTERR[$i]=""; done
+while :; do
+  now=$(date +%s); all_term=1; msg=""
+  for i in "${!JOBS[@]}"; do
+    j=${JOBS[$i]}; e=${EXPS[$i]}
+    info=$(ssh -n -o BatchMode=yes -o ConnectTimeout=20 babel "timeout 60 bash -c '
+      sacct -X -n -P -j $j --format=State,Restarts,Elapsed 2>/dev/null | head -1
+      q=\$(squeue -h -j $j -o \"%T|%r\" 2>/dev/null | head -1); echo \"\${q:-none|none}\"
+      f=\$(ls \$HOME/ae/out/*$j*.out 2>/dev/null | head -1)
+      if [ -n \"\$f\" ]; then stat -c %s \"\$f\"; tail -c 200000 \"\$f\" | grep \"\\\"loss\\\"\" | tail -1 | cut -c1-400
+        tail -c 200000 \"\$f\" | grep -E \"Traceback|[A-Za-z]Error|illegal memory|Nonfinite|\\\"loss\\\": NaN\" | grep -v \"\\\"event\\\"\" | tail -3 | cut -c1-200; fi'" 2>/dev/null)
+    st=$(echo "$info" | sed -n 1p | cut -d'|' -f1 | awk '{print $1}')
+    rs=$(echo "$info" | sed -n 1p | cut -d'|' -f2)
+    sq=$(echo "$info" | sed -n 2p); reason=${sq#*|}
+    sz=$(echo "$info" | sed -n 3p); met=$(echo "$info" | sed -n 4p); err=$(echo "$info" | sed -n '5,7p')
+    if echo "$reason" | grep -qi held && ! echo "$released" | grep -q " $j "; then
+      ssh -n babel "scontrol release $j" >/dev/null 2>&1; released="$released $j "
+      echo "[$(date +%H:%M)] HELD $e ($j: $reason) -> released"
+    fi
+    if [ -n "$rs" ] && [ "$rs" != "${LASTRS[$i]}" ] && [ "$rs" -gt 0 ] 2>/dev/null; then
+      echo "[$(date +%H:%M)] REQUEUE $e ($j) restarts=$rs"; LASTRS[$i]=$rs; fi
+    if [ "$st" != "${LASTST[$i]}" ]; then echo "[$(date +%H:%M)] $e ($j) state=$st ${reason:+($reason)}"; LASTST[$i]=$st; fi
+    if [ -n "$met" ]; then
+      prog=$(echo "$met" | python3 -c 'import json,sys
+try:
+  t=sys.stdin.read(); d=json.loads(t[t.index("{"):]); print(d.get("step",0), round(d.get("loss",float("nan")),4), int(d.get("tokens_per_second",0)), d.get("tokens",0))
+except Exception: print("0 nan 0 0")')
+      step=$(echo $prog | cut -d' ' -f1)
+      if [ "${LASTPROG[$i]}" = -1 ] || [ "$step" -ge $(( ${LASTPROG[$i]} + ${LASTPROG[$i]} / 20 + 1 )) ]; then
+        echo "[$(date +%H:%M)] $e step=$step loss=$(echo $prog | cut -d' ' -f2) tok/s=$(echo $prog | cut -d' ' -f3) tokens=$(echo $prog | cut -d' ' -f4)"
+        LASTPROG[$i]=$step
+      fi
+    fi
+    if [ -n "$err" ] && [ "$err" != "${LASTERR[$i]}" ]; then echo "[$(date +%H:%M)] $e ERRORS:"; echo "$err" | sed 's/^/    /'; LASTERR[$i]=$err; fi
+    case "$st" in
+      COMPLETED) msg="$msg $e=COMPLETED";;
+      FAILED|CANCELLED*|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|BOOT_FAIL|DEADLINE)
+        echo "FAILED $e ($j) state=$st"; exit 1;;
+      RUNNING)
+        all_term=0; sz=${sz:-0}
+        if [ "$sz" != "${LASTSZ[$i]}" ]; then LASTSZ[$i]=$sz; LASTGROW[$i]=$now; fi
+        if [ $((now - LASTGROW[$i])) -ge "$STALL" ]; then
+          echo "STALL $e ($j) log unchanged for $((now - LASTGROW[$i]))s"; exit 2; fi;;
+      *) all_term=0;;
+    esac
+  done
+  if [ $all_term -eq 1 ]; then echo "DONE$msg"; exit 0; fi
+  if [ $((now - t0)) -ge "$TMO" ]; then echo "TIMEOUT after $((now - t0))s:$msg"; exit 3; fi
+  sleep "$IV"
+done

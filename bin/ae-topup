@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# ==========================================================================
+# ae-topup -- ordered fleet submitter (deterministic; makes NO scientific decisions).
+#
+# Works through an ORDERED queue file written by the orchestrator, one entry per line:
+#     <expid>|<dest: main|gen>|<after-expids comma list, or ->
+# Each cycle (default every 300 s):
+#   1. submit the next entries while the destination pool is under its submit cap
+#      (AE_MAX_SUBMIT / AE_GEN_MAX_SUBMIT). `ae submit` places the job by its #EXP
+#      part=; if that differs from <dest>, the job is moved with `scontrol update`.
+#   2. no-idle rule (only with a second pool): if the gen pool has a free GPU and no
+#      runnable pending gen job, move the oldest runnable pending main-pool job named
+#      in the queue file to gen.
+# Prints one line per action (stdout = event stream for the orchestrator). Skips a cycle
+# when the project tree is dirty (ae submit would refuse anyway). Never retries a
+# failed submission: it stops the pass and reports.
+# Done entries are recorded in <queue-file>.done (bookkeeping only; Slurm is the truth).
+#
+# Usage: ae-topup <queue-file> [interval-seconds]
+# ==========================================================================
+set -u
+AE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AE_HOME="${AE_HOME:-$AE_DIR}"
+REPO="${AE_REPO:-$(cd "$AE_DIR/.." && pwd)}"
+# shellcheck disable=SC1091
+. "$AE_HOME/config.sh" || { echo "ae-topup: no config.sh (run ae init)" >&2; exit 2; }
+Q=${1:?queue file}; IV=${2:-300}; AE="$AE_DIR/bin/ae"
+MAIN="$AE_PARTITION"; GEN="${AE_PARTITION_GEN:-}"
+MAIN_CAP="${AE_MAX_SUBMIT:-100}"; GEN_CAP="${AE_GEN_MAX_SUBMIT:-0}"; GEN_GPUS="${AE_GEN_MAX_GPUS:-0}"
+DONE="$Q.done"; touch "$DONE"
+rsh() { ssh -n -o BatchMode=yes -o ConnectTimeout=20 "$AE_HOST" "$@"; }
+move() {   # move <jobid> <main|gen>
+    if [ "$2" = gen ]; then rsh "scontrol update JobId=$1 Partition=$GEN QOS=$AE_QOS_GEN"
+    else rsh "scontrol update JobId=$1 Partition=$MAIN QOS=$AE_QOS_GPU"; fi
+}
+while true; do
+    if [ -n "$(git -C "$REPO" status --porcelain --untracked-files=no)" ]; then sleep "$IV"; continue; fi
+    snap=$(rsh 'squeue -u $USER -h -o "%i|%P|%T|%r|%j|%b"' 2>/dev/null) || { sleep "$IV"; continue; }
+    nmain=$(awk -F'|' -v p="$MAIN" '$2==p' <<<"$snap" | wc -l | tr -d ' ')
+    ngen=0; [ -n "$GEN" ] && ngen=$(awk -F'|' -v p="$GEN" '$2==p' <<<"$snap" | wc -l | tr -d ' ')
+    while IFS='|' read -r exp dest after; do
+        [ -z "$exp" ] && continue
+        grep -qxF "$exp" "$DONE" && continue
+        grep -q "|ae-$exp|" <<<"$snap" && { echo "$exp" >> "$DONE"; continue; }
+        [ "$dest" = gen ] && [ -z "$GEN" ] && dest=main
+        [ "$dest" = main ] && [ "$nmain" -ge "$MAIN_CAP" ] && continue
+        [ "$dest" = gen ] && [ "$GEN_CAP" -gt 0 ] && [ "$ngen" -ge "$GEN_CAP" ] && continue
+        dep=""; [ -n "$after" ] && [ "$after" != "-" ] && dep="--after $after"
+        out=$("$AE" submit "$exp" $dep 2>&1 < /dev/null)
+        jid=$(grep -oE '^submitted .* job=[0-9]+' <<<"$out" | grep -oE '[0-9]+$')
+        part=$(grep -oE 'part=[^ ]+' <<<"$out" | head -1 | cut -d= -f2)
+        if [ -z "$jid" ]; then echo "TOPUP-SUBMIT-FAILED $exp: $(grep -E '^ae:|rror' <<<"$out" | head -1)"; break; fi
+        want="$MAIN"; [ "$dest" = gen ] && want="$GEN"
+        if [ "$part" != "$want" ]; then
+            if msg=$(move "$jid" "$dest" 2>&1); then echo "TOPUP $exp job=$jid -> $want (moved)"
+            else echo "TOPUP-MOVE-FAILED $exp job=$jid stays on $part: $(head -1 <<<"$msg")"; fi
+        else echo "TOPUP $exp job=$jid -> $part"; fi
+        [ "$dest" = gen ] && ngen=$((ngen+1)) || nmain=$((nmain+1))
+        echo "$exp" >> "$DONE"
+    done < "$Q"
+    # no idle second-pool GPU while a runnable job waits on the main pool
+    if [ -n "$GEN" ] && [ "$GEN_GPUS" -gt 0 ]; then
+        snap=$(rsh 'squeue -u $USER -h -o "%i|%P|%T|%r|%j|%b"' 2>/dev/null) || { sleep "$IV"; continue; }
+        grun=$(awk -F'|' -v p="$GEN" '$2==p && $3=="RUNNING" && $6 ~ /gpu/' <<<"$snap" | wc -l | tr -d ' ')
+        grunnable=$(awk -F'|' -v p="$GEN" '$2==p && $3=="PENDING" && $4!="Dependency" && $4!="JobHeldUser" && $4!="BeginTime"' <<<"$snap" | wc -l | tr -d ' ')
+        if [ "$grun" -lt "$GEN_GPUS" ] && [ "$grunnable" -eq 0 ]; then
+            while IFS='|' read -r exp dest after; do
+                jid=$(awk -F'|' -v p="$MAIN" -v n="ae-$exp" '$2==p && $3=="PENDING" && $5==n && $4!="Dependency" {print $1}' <<<"$snap" | head -1)
+                [ -z "$jid" ] && continue
+                if msg=$(move "$jid" gen 2>&1); then echo "TOPUP-IDLEFILL $exp job=$jid $MAIN -> $GEN ($grun/$GEN_GPUS running)"; break
+                else echo "TOPUP-IDLEFILL-FAILED $exp job=$jid: $(head -1 <<<"$msg")"; fi
+            done < "$Q"
+        fi
+    fi
+    sleep "$IV"
+done

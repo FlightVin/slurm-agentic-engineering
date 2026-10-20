@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# MOCK scp: strips "host:" and copies locally.
+a=(); while [ $# -gt 0 ]; do case "$1" in -q|-r|-p) shift;; -o) shift 2;; *) a+=("${1#*:}"); shift;; esac; done
+cp "${a[0]}" "${a[1]}"

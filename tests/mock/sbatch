@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# MOCK sbatch: assigns a job id and RUNS the job script synchronously (no queue).
+S="$MOCK_SLURM"; mkdir -p "$S"; script=""; parsable=0
+for x in "$@"; do case "$x" in --test-only) exit 1;; --parsable) parsable=1;; -*) ;; *) script="$x";; esac; done
+id=$(( $(cat "$S/next" 2>/dev/null || echo 1000) + 1 )); echo $id > "$S/next"
+name=$(grep -m1 '^#SBATCH -J ' "$script" | awk '{print $3}')
+qos=$(grep -m1 '^#SBATCH -q ' "$script" | awk '{print $3}'); part=$(grep -m1 '^#SBATCH -p ' "$script" | awk '{print $3}')
+outp=$(grep -m1 '^#SBATCH -o ' "$script" | awk '{print $3}' | sed "s/%j/$id/")
+mkdir -p "$(dirname "$outp")"
+SLURM_JOB_ID=$id SLURM_JOB_QOS=$qos SLURM_JOB_PARTITION=$part bash "$script" >> "$outp" 2>&1; rc=$?
+st=COMPLETED; [ $rc -ne 0 ] && st=FAILED
+echo "$id|$name|$st|$rc:0" >> "$S/jobs"
+[ $parsable = 1 ] && echo $id || echo "Submitted batch job $id"

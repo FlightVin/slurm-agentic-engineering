@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# v6-watch -- bounded monitor for one or more ae experiments.
+#
+#   v6-watch [--timeout S] [--interval S] [--stall S] EXPID [EXPID ...]
+#
+# Polls Slurm (sacct/squeue, the source of truth) every --interval seconds (default 180)
+# for the jobs the ledger records for each EXPID, and EXITS with a one-line reason as soon
+# as any of these happens:
+#   DONE     all watched jobs reached a terminal state (prints each state)
+#   FAILED   any job ended FAILED/CANCELLED/TIMEOUT/OUT_OF_MEMORY/NODE_FAIL
+#   STALL    a RUNNING job's log did not grow for --stall seconds (default 2400)
+#   TIMEOUT  --timeout seconds elapsed (default 10800)
+# and it acts on two routine conditions without exiting:
+#   HELD     "launch failed requeued held" -> scontrol release (once per job), logged
+#   REQUEUE  restart count increased (preemption / node failure) -> logged
+# Exit code: 0 DONE, 1 FAILED, 2 STALL, 3 TIMEOUT. No daemon: it ends by itself.
+set -uo pipefail
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+LEDGER="$HERE/state/LEDGER.jsonl"
+TMO=10800; IV=180; STALL=2400
+while [ $# -gt 0 ]; do case "$1" in
+  --timeout) TMO=$2; shift 2;; --interval) IV=$2; shift 2;; --stall) STALL=$2; shift 2;;
+  *) break;; esac; done
+[ $# -gt 0 ] || { echo "usage: v6-watch [--timeout S] [--interval S] [--stall S] EXPID..."; exit 4; }
+declare -a EXPS=("$@") JOBS=()
+for e in "${EXPS[@]}"; do
+  j=$(grep "\"expid\": *\"$e\"" "$LEDGER" | tail -1 | sed 's/.*"jobid": *"\([^"]*\)".*/\1/')
+  [ -n "$j" ] || { echo "v6-watch: no ledger job for $e"; exit 4; }
+  JOBS+=("$j")
+done
+t0=$(date +%s)
+released=""
+declare -a LASTSZ LASTGROW LASTRS
+for i in "${!JOBS[@]}"; do LASTSZ[$i]=-1; LASTGROW[$i]=$t0; LASTRS[$i]=0; done
+while :; do
+  now=$(date +%s)
+  all_term=1; msg=""
+  for i in "${!JOBS[@]}"; do
+    j=${JOBS[$i]}; e=${EXPS[$i]}
+    line=$(ssh -n -o BatchMode=yes babel "sacct -X -n -P -j $j --format=State,Restarts,Elapsed 2>/dev/null | head -1; squeue -h -j $j -o '%T|%r' 2>/dev/null")
+    st=$(echo "$line" | head -1 | cut -d'|' -f1 | awk '{print $1}')
+    rs=$(echo "$line" | head -1 | cut -d'|' -f2)
+    sq=$(echo "$line" | sed -n 2p)
+    reason=${sq#*|}
+    if echo "$reason" | grep -qi held; then
+      if ! echo "$released" | grep -q " $j "; then
+        ssh -n babel "scontrol release $j" >/dev/null 2>&1
+        released="$released $j "
+        echo "[$(date +%H:%M)] HELD $e ($j: $reason) -> released"
+      fi
+    fi
+    if [ -n "$rs" ] && [ "$rs" != "${LASTRS[$i]}" ] && [ "$rs" -gt 0 ] 2>/dev/null; then
+      echo "[$(date +%H:%M)] REQUEUE $e ($j) restarts=$rs"; LASTRS[$i]=$rs
+    fi
+    case "$st" in
+      COMPLETED) msg="$msg $e=COMPLETED";;
+      FAILED|CANCELLED*|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|BOOT_FAIL|DEADLINE)
+        echo "FAILED $e ($j) state=$st"; exit 1;;
+      RUNNING)
+        all_term=0
+        sz=$(ssh -n -o BatchMode=yes babel "stat -c %s \$HOME/ae/out/*$j*.out 2>/dev/null | head -1")
+        sz=${sz:-0}
+        if [ "$sz" != "${LASTSZ[$i]}" ]; then LASTSZ[$i]=$sz; LASTGROW[$i]=$now; fi
+        if [ $((now - LASTGROW[$i])) -ge "$STALL" ]; then
+          echo "STALL $e ($j) log unchanged for $((now - LASTGROW[$i]))s"; exit 2; fi;;
+      *) all_term=0;;
+    esac
+  done
+  if [ $all_term -eq 1 ]; then echo "DONE$msg"; exit 0; fi
+  if [ $((now - t0)) -ge "$TMO" ]; then echo "TIMEOUT after $((now - t0))s:$msg"; exit 3; fi
+  sleep "$IV"
+done

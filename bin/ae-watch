@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# ==========================================================================
+# ae-watch -- cheap, deterministic job-event watcher (no agent, no tokens).
+#
+# Polls Slurm (one sacct call per cycle, over the existing ssh link) for the jobs
+# in state/LEDGER.jsonl and EXITS printing one line as soon as something needs the
+# orchestrator's judgement:
+#   JOB EVENT: FAIL <job-name>(<jobid>)=<STATE>; DONE <job-name>(<jobid>); ...
+# Run it as a background task; its exit is the wake-up. Re-arm it after handling.
+#
+# It reports THAT something happened, never what to do about it.
+# Watermark: <workspace>/.ae-watch-wm records events already reported, so the same
+# event is not reported twice. It is notification bookkeeping ONLY -- Slurm stays
+# the authority for job state. Delete it to re-report everything.
+#
+# Usage: ae-watch [--once] [--interval S] [--max-hours H]
+#                 [--suppress-done REGEX]      routine completions to stay quiet about
+#                 [--when-complete REGEX:N:LABEL]  one event when N matching expids are COMPLETED
+#   --once        one check; prints events (exit 0) or nothing (exit 3)
+# Failures (any terminal state other than COMPLETED) are ALWAYS reported.
+# ==========================================================================
+set -uo pipefail
+AE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AE_HOME="${AE_HOME:-$AE_DIR}"
+LEDGER="$AE_HOME/state/LEDGER.jsonl"
+[ -f "$AE_HOME/config.sh" ] || { echo "ae-watch: no $AE_HOME/config.sh (run ae init)" >&2; exit 2; }
+# shellcheck disable=SC1091
+. "$AE_HOME/config.sh"
+[ -n "${AE_HOST:-}" ] || { echo "ae-watch: AE_HOST not set" >&2; exit 2; }
+
+ONCE=0; IV=180; MAXH=15; SUPPRESS=""; WHEN=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --once) ONCE=1; shift;;
+        --interval) IV="$2"; shift 2;;
+        --max-hours) MAXH="$2"; shift 2;;
+        --suppress-done) SUPPRESS="$2"; shift 2;;
+        --when-complete) WHEN+=("$2"); shift 2;;
+        *) echo "ae-watch: unknown argument $1" >&2; exit 2;;
+    esac
+done
+WM="$AE_HOME/.ae-watch-wm"; touch "$WM"
+deadline=$(( $(date +%s) + MAXH * 3600 ))
+
+check() {   # prints the event string (possibly empty); returns 1 on a transient ssh failure
+    [ -s "$LEDGER" ] || return 0
+    local ids; ids=$(sed 's/.*"jobid":"\([0-9_]*\)".*/\1/' "$LEDGER" | grep -E '^[0-9]+$' | sort -u | paste -sd, -)
+    [ -n "$ids" ] || return 0
+    local out; out=$(ssh -n -o BatchMode=yes -o ConnectTimeout=20 "$AE_HOST" \
+        "sacct -X -n -P -o JobID,JobName,State -j '$ids' 2>/dev/null") || return 1
+    local ev="" id name st key
+    # failures: every terminal non-COMPLETED attempt, once
+    while IFS='|' read -r id name st; do
+        st=${st%% *}
+        case "$st" in ""|PENDING|RUNNING|REQUEUED|REQUEUE_HOLD|PREEMPTED|COMPLETING|COMPLETED|SUSPENDED|CONFIGURING|RESIZING) continue;; esac
+        key="F:$id:$st"; grep -qxF "$key" "$WM" || { echo "$key" >> "$WM"; ev="$ev FAIL $name($id)=$st;"; }
+    done <<< "$out"
+    # completions: the LATEST job of each name is COMPLETED (earlier attempts ignored)
+    local latest; latest=$(echo "$out" | sort -t'|' -k2,2 -k1,1n | awk -F'|' '{last[$2]=$0} END{for(n in last) print last[n]}')
+    while IFS='|' read -r id name st; do
+        [ "${st%% *}" = COMPLETED ] || continue
+        key="C:$name:$id"; grep -qxF "$key" "$WM" && continue
+        echo "$key" >> "$WM"
+        if [ -n "$SUPPRESS" ] && echo "${name#ae-}" | grep -qE "$SUPPRESS"; then continue; fi
+        ev="$ev DONE $name($id);"
+    done <<< "$latest"
+    # group completions
+    local w re n label c
+    for w in "${WHEN[@]:-}"; do
+        [ -n "$w" ] || continue
+        re=${w%%:*}; n=${w#*:}; label=${n#*:}; n=${n%%:*}
+        c=$(echo "$latest" | awk -F'|' '$3 ~ /^COMPLETED/ {print $2}' | sed 's/^ae-//' | grep -cE "$re")
+        key="G:$label"
+        if [ "$c" -ge "$n" ] && ! grep -qxF "$key" "$WM"; then echo "$key" >> "$WM"; ev="$ev ALL-COMPLETE $label ($c/$n);"; fi
+    done
+    printf '%s' "$ev"
+}
+
+while :; do
+    ev=$(check) || { [ "$ONCE" = 1 ] && exit 3; sleep "$IV"; continue; }
+    if [ -n "$ev" ]; then echo "JOB EVENT:$ev"; exit 0; fi
+    [ "$ONCE" = 1 ] && exit 3
+    [ "$(date +%s)" -ge "$deadline" ] && { echo "ae-watch: expired after ${MAXH}h with no event"; exit 0; }
+    sleep "$IV"
+done

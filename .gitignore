@@ -1,0 +1,17 @@
+# ---- project WORKSPACE (created by `ae init` from templates/project/; never part of the harness) ----
+/config.sh
+/PROJECT.md
+/cluster/
+/state/
+/exp/
+/inv/
+/results/
+/log/
+/.reset-backups/
+/.ae-watch-wm
+# ---- runtime / local artifacts ----
+.claude/settings.local.json
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/

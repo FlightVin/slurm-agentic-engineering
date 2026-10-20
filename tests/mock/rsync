@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# MOCK rsync (-a -e ssh host:src/ dst/): copies the directory contents locally.
+a=(); while [ $# -gt 0 ]; do case "$1" in -e) shift 2;; -*) shift;; *) a+=("${1#*:}"); shift;; esac; done
+mkdir -p "${a[1]}"; cp -R "${a[0]}". "${a[1]}"

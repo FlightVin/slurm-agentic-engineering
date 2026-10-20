@@ -1,0 +1,787 @@
+#!/usr/bin/env bash
+# ==========================================================================
+# ae -- laptop-side orchestrator for preemptible-Slurm experiments.
+#
+# Runs ONLY on the laptop. Reaches the cluster over a multiplexed ssh
+# connection. Holds no daemon, no state file that Slurm could contradict.
+#
+#   ae help            full command list
+#   ae doctor          verify the environment end to end
+# ==========================================================================
+set -uo pipefail
+
+die()  { echo "ae: $*" >&2; exit 1; }
+info() { echo "  $*"; }
+
+# --- three locations, resolved once ---------------------------------------
+#   AE_DIR   this harness (bin/, lib/, templates/, scripts/, selftest/); never holds
+#            project data.
+#   AE_HOME  the project WORKSPACE: config.sh, PROJECT.md, cluster/CARD.md, state/,
+#            exp/, inv/, results/, log/. Default: the harness directory itself; the
+#            harness .gitignore keeps every workspace path out of the harness repo.
+#   REPO     the project's git repository (what is pinned and run on the cluster).
+#            Default: the directory that contains the harness.
+AE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AE_HOME="${AE_HOME:-$AE_DIR}"
+REPO="${AE_REPO:-$(cd "$AE_DIR/.." && pwd)}"
+STATE="$AE_HOME/state"; LEDGER="$STATE/LEDGER.jsonl"
+
+load_config() {
+    [ -f "$AE_HOME/config.sh" ] || die "no site config at $AE_HOME/config.sh
+    Run 'ae init' (creates it from config.example.sh), then fill in the cluster values."
+    # shellcheck disable=SC1091
+    . "$AE_HOME/config.sh"
+    # Optional settings: unset = feature off / documented default.
+    : "${AE_REMOTE:=origin}" "${AE_REMOTE_ROOT:=\$HOME/ae}"
+    : "${AE_PARTITION_GEN:=}" "${AE_QOS_GEN:=}" "${AE_GEN_MAX_GPUS:=0}" "${AE_GEN_MAX_SUBMIT:=0}"
+    : "${AE_GEN_MAX_SECONDS:=0}" "${AE_GEN_MAX_RUNNING:=0}"
+    : "${AE_DEFAULT_CPUS:=4}" "${AE_DEFAULT_TIME:=08:00:00}" "${AE_SIGNAL:=B:USR1@120}"
+    : "${AE_DBG_NAME:=ae-dbg}" "${AE_DBG_GPUS:=1}" "${AE_DBG_CPUS:=4}" "${AE_DBG_TIME:=24:00:00}" "${AE_DBG_POOL:=0}"
+    : "${AE_DBG_CPU_NAME:=ae-dbg-cpu}" "${AE_DBG_CPU_CPUS:=4}" "${AE_DBG_CPU_TIME:=12:00:00}" "${AE_DBG_CPU_POOL:=2}"
+    : "${AE_DBG_GEN_NAME:=ae-dbg-gen}" "${AE_DBG_GEN_GPUS:=1}" "${AE_DBG_GEN_CPUS:=4}" "${AE_DBG_GEN_TIME:=24:00:00}" "${AE_DBG_GEN_POOL:=0}"
+    : "${AE_MAX_GPUS_PER_USER:=0}" "${AE_MAX_SUBMIT:=100}" "${AE_HARVEST_MAX_KB:=2048}"
+    : "${AE_AGENT_CMD:=claude --permission-mode acceptEdits}"
+    local v
+    for v in AE_HOST AE_REMOTE_REPO AE_BRANCH AE_PARTITION AE_QOS_GPU AE_QOS_CPU; do
+        [ -n "${!v:-}" ] || die "config.sh: $v is not set (see config.example.sh)"
+    done
+    [ -z "$AE_PARTITION_GEN" ] || [ -n "$AE_QOS_GEN" ] || die "config.sh: AE_PARTITION_GEN is set but AE_QOS_GEN is not"
+    mkdir -p "$STATE" "$AE_HOME/results" "$AE_HOME/exp" "$AE_HOME/inv"
+    touch "$LEDGER"
+}
+has_gen() { [ -n "$AE_PARTITION_GEN" ]; }   # optional second (e.g. non-preemptible) pool
+
+rsh()  { ssh -n -o BatchMode=yes -o ConnectTimeout=20 "$AE_HOST" "$@"; }   # -n: never consume stdin
+rscp() { scp -q -o ConnectTimeout=20 "$@"; }                               # ConnectTimeout: never hang on connect
+                                                      # (called inside while-read loops)
+
+RROOT=""; RREPO=""
+ensure_link() {   # a stale ControlMaster HANGS rather than fails; re-establish
+    if ! ssh -O check "$AE_HOST" >/dev/null 2>&1; then
+        ssh -O exit "$AE_HOST" >/dev/null 2>&1
+        ssh -o BatchMode=yes -o ConnectTimeout=30 "$AE_HOST" true 2>/dev/null \
+            || die "cannot reach $AE_HOST (check ~/.ssh/config ControlMaster block)"
+    fi
+    # scp/sftp does NOT expand $HOME in remote paths (ssh does). Resolve the
+    # configured paths to literals once, and use the literals everywhere.
+    if [ -z "$RROOT" ]; then
+        local r; r=$(rsh "echo $AE_REMOTE_ROOT; echo $AE_REMOTE_REPO")
+        RROOT=$(echo "$r" | sed -n 1p); RREPO=$(echo "$r" | sed -n 2p)
+        [ -n "$RROOT" ] || die "could not resolve remote root"
+    fi
+}
+
+git_repo() { git -C "$REPO" "$@"; }
+
+require_branch() {
+    local b; b=$(git_repo rev-parse --abbrev-ref HEAD)
+    [ "$b" = "$AE_BRANCH" ] || die "on branch '$b'; expected '$AE_BRANCH' (git checkout $AE_BRANCH)"
+}
+
+# Dirty-tree policy: REFUSE by default. A run must be attributable to a commit.
+# --allow-dirty commits everything to the authoritative branch first.
+resolve_sha() {
+    local allow_dirty="${1:-0}"
+    if [ -n "$(git_repo status --porcelain)" ]; then
+        if [ "$allow_dirty" = "1" ]; then
+            git_repo add -A
+            git_repo commit -q -m "ae: autocommit before submit" || true
+        else
+            die "working tree is dirty. Commit it, or pass --allow-dirty.
+    A run must be reproducible from a commit; unpushed code cannot be materialised."
+        fi
+    fi
+    git_repo push -q "$AE_REMOTE" "HEAD:$AE_BRANCH" 2>/dev/null \
+        || die "git push to $AE_REMOTE/$AE_BRANCH failed"
+    git_repo rev-parse HEAD
+}
+
+# expsha pins the RECIPE. The workspace (exp/, state/, ...) is outside the project's
+# git tracking, so editing an exp/*.sh does not dirty the tree and would otherwise
+# change what runs at the "same" sha.
+ledger_add() { printf '{"expid":"%s","jobid":"%s","sha":"%s","expsha":"%s","submitted":"%s","deps":"%s"}\n' \
+                 "$1" "$2" "$3" "$5" "$(date -u +%FT%TZ)" "${4:-}" >> "$LEDGER"; }
+# Slurm cannot race one job across two pools when QOSes are partition-specific, and
+# `--test-only` does NOT validate the partition/QOS pairing. So we ask each pool
+# separately and take the earlier answer. ISO-8601 start times sort lexicographically.
+pool_eta() {   # pool_eta <partition> <qos> <gres> <cpus> <time> -> ISO start or ""
+    rsh "sbatch --test-only -p $1 -q $2 $3 -c $4 -t $5 --wrap=true 2>&1" \
+        | grep -oE 'to start at [0-9T:-]+' | awk '{print $4}' | head -1
+}
+hms_to_secs() {   # [D-]HH:MM:SS -> seconds
+    local l="$1" d=0
+    case "$l" in *-*) d=${l%%-*}; l=${l#*-};; esac
+    local IFS=:; set -- $l
+    # 10# forces base 10: "08"/"09" are invalid octal in bash arithmetic
+    case $# in 3) echo $((10#$d*86400+10#$1*3600+10#$2*60+10#$3));; 2) echo $((10#$d*86400+10#$1*60+10#$2));;
+               1) echo $((10#$d*86400+10#$1));; *) echo "";; esac
+}
+exp_sha() { shasum -a 256 "$(expfile "$1")" | cut -c1-12; }
+ledger_job() { grep "\"expid\": *\"$1\"" "$LEDGER" 2>/dev/null | tail -1 | sed 's/.*"jobid": *"\([^"]*\)".*/\1/'; }
+# NEVER pass an empty jobid to squeue/sacct: `squeue -j ""` lists ALL jobs rather
+# than failing, which silently corrupts every caller's logic.
+valid_jobid() { case "${1:-}" in ''|*[!0-9_]*) return 1;; *) return 0;; esac; }
+ledger_expsha() { grep "\"expid\": *\"$1\"" "$LEDGER" 2>/dev/null | tail -1 | sed 's/.*"expsha": *"\([^"]*\)".*/\1/'; }
+ledger_sha() { grep "\"expid\": *\"$1\"" "$LEDGER" 2>/dev/null | tail -1 | sed 's/.*"sha": *"\([^"]*\)".*/\1/'; }
+ledger_exps(){ sed 's/.*"expid":"\([^"]*\)".*/\1/' "$LEDGER" 2>/dev/null | awk '!seen[$0]++'; }
+
+# --- #EXP header parsing ---------------------------------------------------
+# Workspace experiments first; the harness's own self-test (selftest/ae-smoke*.sh)
+# is the fallback, so `ae submit ae-smoke` works in a brand-new project.
+expfile() {
+    if [ -f "$AE_HOME/exp/$1.sh" ] || [ ! -f "$AE_DIR/selftest/$1.sh" ]; then echo "$AE_HOME/exp/$1.sh"
+    else echo "$AE_DIR/selftest/$1.sh"; fi
+}
+exp_meta() {  # exp_meta <expid> <key> <default>
+    local f; f=$(expfile "$1")
+    local v; v=$(grep -E '^#EXP ' "$f" 2>/dev/null | tr ' ' '\n' | grep "^$2=" | tail -1 | cut -d= -f2-)
+    echo "${v:-$3}"
+}
+
+# ===========================================================================
+cmd_paths() {   # no config, no network: where everything resolves to
+    echo "harness (AE_DIR):   $AE_DIR"
+    echo "workspace (AE_HOME): $AE_HOME"
+    echo "project repo (REPO): $REPO"
+    echo "config:              $AE_HOME/config.sh $( [ -f "$AE_HOME/config.sh" ] && echo '(present)' || echo '(MISSING: ae init)')"
+    echo "ledger:              $LEDGER $( [ -f "$LEDGER" ] && echo '(present)' || echo '(absent)')"
+    git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+        && echo "repo branch:         $(git -C "$REPO" rev-parse --abbrev-ref HEAD)" \
+        || echo "repo branch:         (REPO is not a git work tree)"
+}
+
+cmd_init() {    # create missing workspace docs + config from templates (never overwrites)
+    command -v python3 >/dev/null || die "python3 is required for ae init"
+    python3 "$AE_DIR/scripts/reset_project.py" --target "$REPO" --workspace "$AE_HOME" --apply --missing-only "$@"
+}
+
+cmd_setup() {
+    load_config; ensure_link
+    info "creating remote layout under $RROOT"
+    rsh "mkdir -p $RROOT/{jobs,code,work,out,results,inv,run}" || die "mkdir failed"
+    info "compute-side repo: $RREPO"
+    rsh "cd $RREPO && git fetch -q $AE_REMOTE && echo '  fetch ok'" || die "remote git fetch failed (clone the project to $AE_REMOTE_REPO first)"
+    cmd_doctor
+}
+
+cmd_doctor() {
+    load_config; ensure_link
+    echo "== connection =="
+    # Test multiplexing directly, not by latency: what multiplexing removes is the
+    # multi-second AUTH handshake and its variance, not the remote shell's cost.
+    if ssh -O check "$AE_HOST" >/dev/null 2>&1; then
+        info "ControlMaster: ACTIVE (auth handshake amortised)"
+    else
+        info "ControlMaster: NOT ACTIVE -- expect seconds per command."
+        info "  add ControlMaster/ControlPath/ControlPersist to your ~/.ssh/config $AE_HOST block"
+    fi
+    local t0 t1; t0=$(python3 -c 'import time;print(int(time.time()*1000))'); rsh true; t1=$(python3 -c 'import time;print(int(time.time()*1000))')
+    info "remote command round trip: $(( t1-t0 )) ms"
+    echo "== paths =="; cmd_paths | sed 's/^/  /'
+    echo "== laptop git =="
+    info "branch: $(git_repo rev-parse --abbrev-ref HEAD)   head: $(git_repo rev-parse --short HEAD)   expected: $AE_BRANCH"
+    info "dirty paths: $(git_repo status --porcelain | wc -l | tr -d ' ')"
+    echo "== cluster =="
+    rsh "echo '  slurm: '\$(sinfo --version); echo '  qos:   '\$(sacctmgr -n -s show user \$USER format=QOS%60 | tr -s ' '); \
+         cd $RREPO 2>/dev/null && echo '  repo:  '\$(git rev-parse --abbrev-ref HEAD)' @ '\$(git rev-parse --short HEAD) || echo '  repo:  MISSING ($RREPO)'; \
+         echo '  remote: '\$(git -C $RREPO ls-remote --heads $AE_REMOTE $AE_BRANCH 2>&1 | head -1 | cut -c1-60)"
+    echo "== capacity =="
+    local g; g=$(rsh "squeue -h -u \$USER -t R,PD -o '%b' | grep -o 'gpu:[0-9]*' | cut -d: -f2 | paste -sd+ - | bc 2>/dev/null")
+    info "gpus in flight: ${g:-0} / ${AE_MAX_GPUS_PER_USER:-?}"
+    info "standby cpu:    $(rsh "squeue -h -u \$USER -n $AE_DBG_CPU_NAME -t R,PD,CF -o %i" | grep -c . || true) / $AE_DBG_CPU_POOL   (default tinkering tier)"
+    info "standby gpu:    $(rsh "squeue -h -u \$USER -n $AE_DBG_NAME -t R,PD,CF -o %i" | grep -c . || true) / $AE_DBG_POOL"
+    has_gen && info "standby gen:    $(rsh "squeue -h -u \$USER -n $AE_DBG_GEN_NAME -t R,PD,CF -o %i" | grep -c . || true) / $AE_DBG_GEN_POOL"
+    return 0
+}
+
+# --- standby capacity ------------------------------------------------------
+cmd_pool() {
+    # ae pool [cpu|gpu|gen|all ...]   (default: every configured tier)
+    # Numeric shorthand, for CPU/GPU standby ONLY (never the gen tier):
+    #   ae pool 3      -> 3 cpu standby
+    #   ae pool 3 2    -> 3 cpu, 2 preempt-gpu
+    load_config; ensure_link
+    rscp "$AE_DIR/lib/standby.sh" "$AE_HOST:$RROOT/standby.sh"
+    rsh "chmod +x $RROOT/standby.sh"
+    local want_cpu="" want_gpu="" want_gen="" tiers=""
+    if [ $# -eq 0 ]; then tiers="cpu gpu gen"
+    elif [ "$1" -eq "$1" ] 2>/dev/null; then
+        tiers="cpu"; want_cpu="$1"
+        if [ -n "${2:-}" ]; then tiers="cpu gpu"; want_gpu="$2"; fi
+    else
+        for a in "$@"; do
+            case "$a" in
+                cpu|gpu|gen) tiers="$tiers $a";;
+                all)         tiers="cpu gpu gen";;
+                *) die "ae pool: unknown tier '$a' (want: cpu | gpu | gen | all)";;
+            esac
+        done
+    fi
+    case " $tiers " in *" cpu "*) _pool_tier "$AE_DBG_CPU_NAME" "${want_cpu:-$AE_DBG_CPU_POOL}" \
+            "$AE_QOS_CPU" "" "$AE_DBG_CPU_CPUS" "$AE_DBG_CPU_TIME" "$AE_PARTITION";; esac
+    case " $tiers " in *" gpu "*) _pool_tier "$AE_DBG_NAME" "${want_gpu:-$AE_DBG_POOL}" \
+            "$AE_QOS_GPU" "--gres=gpu:$AE_DBG_GPUS" "$AE_DBG_CPUS" "$AE_DBG_TIME" "$AE_PARTITION";; esac
+    case " $tiers " in *" gen "*)
+        if has_gen; then _pool_tier "$AE_DBG_GEN_NAME" "${want_gen:-$AE_DBG_GEN_POOL}" \
+            "$AE_QOS_GEN" "--gres=gpu:$AE_DBG_GEN_GPUS" "$AE_DBG_GEN_CPUS" "$AE_DBG_GEN_TIME" "$AE_PARTITION_GEN"
+        else info "standby[gen]: no second pool configured (AE_PARTITION_GEN unset) -- skipped"; fi;; esac
+    cmd_standby_list
+}
+# Slurm holds a job at Priority=0 with reason `launch_failed_requeued_held` when a
+# node fails to launch it. Such a job is PENDING forever and was counted as live
+# capacity, so the pool silently stayed empty. Release it -- only that one reason,
+# never an operator/admin hold.
+_release_held() {
+    local name="$1" held
+    # `squeue -o %r` prints the reason with SPACES while `scontrol show job` prints
+    # underscores. Delimit with | and accept either spelling.
+    held=$(rsh "squeue -h -u \$USER -n $name -t PD -o '%i|%r'" \
+           | awk -F'|' '$2 ~ /launch[ _]failed[ _]requeued[ _]held/ {print $1}' \
+           | tr '\n' ' ')
+    [ -n "${held// /}" ] || return 0
+    info "  releasing launch-failed hold on: $held"
+    rsh "scontrol release $held" || true
+}
+_pool_tier() {
+    local name="$1" want="$2" qos="$3" gres="$4" cpus="$5" tlim="$6" part="${7:-$AE_PARTITION}"
+    _release_held "$name"
+    local have; have=$(rsh "squeue -h -u \$USER -n $name -t R,PD,CF -o %i" | grep -c . || true)
+    info "standby[$name]: $have alive, want $want"
+    local i jid
+    for (( i=have; i<want; i++ )); do
+        jid=$(rsh "sbatch --parsable -p $part -q $qos $gres -c $cpus -t $tlim -J $name --requeue --signal=$AE_SIGNAL --open-mode=append --export=ALL,AE_ROOT=$RROOT -o $RROOT/out/%j_$name.out $RROOT/standby.sh")
+        [ -n "$jid" ] && info "  submitted $jid"
+    done
+}
+cmd_standby_list() {
+    rsh "squeue -h -u \$USER -n $AE_DBG_NAME,$AE_DBG_CPU_NAME,$AE_DBG_GEN_NAME -o '  %i %j %T %M %L %N %R'" || true
+}
+# Oldest RUNNING standby across a comma-separated list of standby names: oldest
+# because PreemptParameters=youngest_first makes it the least likely to be taken next.
+oldest_dbg() { rsh "squeue -h -u \$USER -n ${1:-$AE_DBG_CPU_NAME} -t R -o '%M %i' | sort -r | head -1 | awk '{print \$2}'"; }
+
+cmd_attach() {
+    load_config; ensure_link
+    local tier="${1:-$AE_DBG_CPU_NAME}"
+    case "$tier" in gpu) tier="$AE_DBG_NAME,$AE_DBG_GEN_NAME";; gen) tier="$AE_DBG_GEN_NAME";;
+                    cpu) tier="$AE_DBG_CPU_NAME";; esac
+    local j; j=$(oldest_dbg "$tier")
+    [ -n "$j" ] || die "no RUNNING standby in tier '$tier'. Run: ae pool"
+    echo "ssh -t $AE_HOST 'srun --jobid=$j --overlap --pty bash'"
+}
+
+# --- experiments -----------------------------------------------------------
+cmd_submit() {
+    load_config; ensure_link; require_branch
+    local expid="" allow_dirty=0 deps="" replace=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --after) deps="$2"; shift 2;;
+            --allow-dirty) allow_dirty=1; shift;;
+            --replace) replace=1; shift;;
+            *) expid="$1"; shift;;
+        esac
+    done
+    [ -n "$expid" ] || die "usage: ae submit <expid> [--after a,b] [--allow-dirty] [--replace]"
+    local f; f=$(expfile "$expid"); [ -f "$f" ] || die "no such experiment: $f"
+
+    local live; live=$(rsh "squeue -h -u \$USER -n ae-$expid -o %i" | head -1)
+    if [ -n "$live" ]; then
+        [ "$replace" = "1" ] || die "$expid already live as job $live (use --replace to cancel and resubmit)"
+        rsh "scancel $live"; info "cancelled $live"
+    fi
+
+    # Quota guards. MaxSubmitPU is a hard cap on how many jobs may exist at all, so
+    # exceeding it is refused. The GPU cap is NOT: Slurm caps ALLOCATED gpus, so a
+    # fleet larger than the quota is legal -- the surplus pends on QOSMaxGRESPerUser
+    # and starts as earlier members finish. Counting RUNNING gpus matches what Slurm
+    # enforces; pending surplus is reported, not refused. Quotas are PER POOL.
+    local ngpu nsub wantgpu wantpart capg caps
+    wantgpu=$(exp_meta "$expid" gpus 1)
+    wantpart=$(exp_meta "$expid" part "$AE_PARTITION")
+    [ "$wantgpu" = "0" ] && wantpart="$AE_PARTITION"      # cpu-only has one home
+    { [ "$wantpart" = "general" ] || [ "$wantpart" = "auto" ]; } && ! has_gen && wantpart="$AE_PARTITION"
+    if has_gen && [ "$wantpart" = "$AE_PARTITION_GEN" ]; then capg=$AE_GEN_MAX_GPUS; caps=$AE_GEN_MAX_SUBMIT
+    else capg=$AE_MAX_GPUS_PER_USER; caps=$AE_MAX_SUBMIT; fi
+    ngpu=$(rsh "squeue -h -u \$USER -t R -p $wantpart -o '%b' | grep -o 'gpu:[0-9]*' | cut -d: -f2 | paste -sd+ - | bc 2>/dev/null")
+    nsub=$(rsh "squeue -h -u \$USER -p $wantpart -o %i | wc -l")
+    if [ "${capg:-0}" -gt 0 ] && [ $(( ${ngpu:-0} + wantgpu )) -gt "$capg" ]; then
+        info "note: ${ngpu:-0} gpus already RUNNING on $wantpart (quota $capg); this job will pend on \
+QOSMaxGRESPerUser until one frees. That is expected for a fleet larger than the quota."
+    fi
+    if [ "${caps:-0}" -gt 0 ] && [ "${nsub:-0}" -ge "$caps" ]; then
+        die "$wantpart: already ${nsub} jobs submitted (cap $caps); the next would pend on QOSMaxSubmit."
+    fi
+
+    local sha; sha=$(resolve_sha "$allow_dirty") || exit 1
+    local esha; esha=$(exp_sha "$expid")
+    local short=${sha:0:7}
+    local gpus cpus tlim after
+    gpus=$(exp_meta "$expid" gpus 1); cpus=$(exp_meta "$expid" cpus "$AE_DEFAULT_CPUS")
+    tlim=$(exp_meta "$expid" time "$AE_DEFAULT_TIME"); after=$(exp_meta "$expid" after "")
+    [ -n "$deps" ] && after="$deps"
+
+    # A GPU QOS that carries MinTRES=gres/gpu=1 makes a 0-GPU job pend forever, so
+    # CPU-only work always goes to the dedicated CPU QOS.
+    local qos gres partition
+    local part; part=$(exp_meta "$expid" part "$AE_PARTITION")
+    local gtype; gtype=$(exp_meta "$expid" gtype "")    # optional GRES type (case-sensitive)
+    local secs; secs=$(hms_to_secs "$tlim")
+    # `part=general` is the portable alias for the configured second pool.
+    [ "$part" = "general" ] && has_gen && part="$AE_PARTITION_GEN"
+    if { [ "$part" = "auto" ] || [ "$part" = "general" ]; } && ! has_gen; then
+        info "part=$part but no second pool is configured -> $AE_PARTITION"; part="$AE_PARTITION"
+    fi
+    if [ "$gpus" = "0" ]; then
+        [ "$part" != "$AE_PARTITION" ] && info "gpus=0 cannot run on $part -- routing to $AE_QOS_CPU"
+        partition="$AE_PARTITION"; qos="$AE_QOS_CPU"; gres=""
+    else
+        if [ "$part" = "auto" ]; then
+            if [ "${AE_GEN_MAX_SECONDS:-0}" -gt 0 ] && [ "${secs:-0}" -gt "$AE_GEN_MAX_SECONDS" ]; then
+                info "auto: time=$tlim exceeds $AE_PARTITION_GEN's max wall -> $AE_PARTITION"
+                part="$AE_PARTITION"
+            else
+                local eg ep
+                eg=$(pool_eta "$AE_PARTITION_GEN" "$AE_QOS_GEN"  "--gres=gpu:$gpus" "$cpus" "$tlim")
+                ep=$(pool_eta "$AE_PARTITION"     "$AE_QOS_GPU"  "--gres=gpu:$gpus" "$cpus" "$tlim")
+                info "auto: earliest start -- $AE_PARTITION_GEN=${eg:-?} $AE_PARTITION=${ep:-?}"
+                if   [ -z "$eg" ]; then part="$AE_PARTITION"
+                elif [ -z "$ep" ]; then part="$AE_PARTITION_GEN"
+                elif [ "$eg" \< "$ep" ]; then part="$AE_PARTITION_GEN"   # ISO-8601 sorts
+                else part="$AE_PARTITION"; fi
+                info "auto: chose $part"
+            fi
+        fi
+        if has_gen && [ "$part" = "$AE_PARTITION_GEN" ]; then
+            partition="$AE_PARTITION_GEN"; qos="$AE_QOS_GEN"; gres="--gres=gpu:${gtype:+$gtype:}$gpus"
+            if [ "${AE_GEN_MAX_SECONDS:-0}" -gt 0 ] && [ "${secs:-0}" -gt "$AE_GEN_MAX_SECONDS" ]; then
+                die "time=$tlim exceeds $AE_PARTITION_GEN's max wall (${AE_GEN_MAX_SECONDS}s).
+    Use part=$AE_PARTITION (requeue-safe) or a shorter time."
+            fi
+        else
+            partition="$AE_PARTITION"; qos="$AE_QOS_GPU"; gres="--gres=gpu:${gtype:+$gtype:}$gpus"
+        fi
+    fi
+
+    local depflag=""
+    if [ -n "$after" ]; then
+        local ids="" d
+        for d in ${after//,/ }; do
+            local j; j=$(ledger_job "$d")
+            [ -n "$j" ] || die "dependency '$d' has never been submitted (no ledger entry)"
+            ids="${ids:+$ids:}$j"
+        done
+        # afterany + each job checking its own precondition: afterok would cancel a
+        # dependent whose input is fine merely because the parent's own eval failed.
+        depflag="--dependency=afterany:$ids"
+        info "depends on $after -> $depflag"
+    fi
+
+    local tmp; tmp=$(mktemp)
+    {
+        echo "#!/bin/bash"
+        echo "# GENERATED by ae -- do not edit. exp=$expid sha=$sha"
+        echo "#SBATCH -J ae-$expid"
+        echo "#SBATCH -p $partition"
+        echo "#SBATCH -q $qos"
+        [ -n "$gres" ] && echo "#SBATCH $gres"
+        local excl; excl=$(exp_meta "$expid" exclude "")
+        [ -n "$excl" ] && echo "#SBATCH --exclude=$excl"
+        local cons; cons=$(exp_meta "$expid" constraint "")   # node features, e.g. VRAM_80GB|VRAM_96GB
+        [ -n "$cons" ] && echo "#SBATCH --constraint=$cons"
+        local memx; memx=$(exp_meta "$expid" mem "")
+        [ -n "$memx" ] && echo "#SBATCH --mem=$memx"
+        echo "#SBATCH -c $cpus"
+        echo "#SBATCH -t $tlim"
+        echo "#SBATCH --requeue"
+        echo "#SBATCH --open-mode=append"
+        echo "#SBATCH --signal=$AE_SIGNAL"
+        echo "#SBATCH -o $RROOT/out/%j_ae-$expid.out"
+        echo
+        echo "AE_EXPID='$expid'"
+        echo "AE_SHA='$sha'"
+        echo "AE_ROOT=\"$RROOT\""
+        echo "AE_CODE=\"$RROOT/code/$expid-$short\""
+        echo "AE_RUNDIR=\"$RROOT/run/$expid/$short-$esha\""
+        echo "AE_RESULTS=\"$RROOT/results/$expid/$short-$esha\""
+        cat "$AE_DIR/lib/preamble.sh"
+        echo
+        echo 'cd "$AE_CODE" || { log "FATAL: pinned worktree $AE_CODE missing"; exit 1; }'
+        echo 'log "cwd=$(pwd) git=$(git rev-parse --short HEAD 2>/dev/null)"'
+        echo
+        echo "# ---------------- experiment definition: $expid ----------------"
+        grep -v '^#EXP ' "$f"
+    } > "$tmp"
+    bash -n "$tmp" || { rm -f "$tmp"; die "generated job script has a syntax error"; }
+
+    rscp "$tmp" "$AE_HOST:$RROOT/jobs/$expid-$short-$esha.sh" || die "scp failed"
+    rm -f "$tmp"
+
+    # Pin: a detached worktree at $sha. Requeue re-enters the identical tree, so
+    # editing the repo while the job is queued cannot change what runs.
+    rsh "set -e
+         cd $RREPO
+         git fetch -q $AE_REMOTE
+         W=$RROOT/code/$expid-$short
+         if [ ! -d \"\$W\" ]; then git worktree add -q --detach \"\$W\" $sha; fi
+         git -C \"\$W\" rev-parse --short HEAD >/dev/null" || die "could not materialise pinned worktree (is $sha pushed?)"
+
+    local jid
+    jid=$(rsh "sbatch --parsable $depflag $RROOT/jobs/$expid-$short-$esha.sh") || die "sbatch failed"
+    ledger_add "$expid" "$jid" "$sha" "$after" "$esha"
+    echo "submitted $expid  job=$jid  sha=$short  recipe=$esha  part=$partition  qos=$qos  gpus=$gpus  time=$tlim${after:+  after=$after}"
+}
+
+cmd_cancel() { load_config; ensure_link; local j; j=$(rsh "squeue -h -u \$USER -n ae-$1 -o %i"|head -1); [ -n "$j" ] && rsh "scancel $j" && echo "cancelled $1 ($j)" || echo "$1 not live"; }
+
+cmd_status() {
+    load_config; ensure_link
+    local quiet=0; [ "${1:-}" = "--changed" ] && quiet=1
+    local live; live=$(rsh "squeue -h -u \$USER -o '%i|%j|%T|%M|%L|%R|%r' ")
+    local exps; exps=$(ledger_exps)
+    # ONE sacct call for every job, not one per experiment (minutes at ~60 experiments).
+    local ids="" e0
+    while read -r e0; do
+        [ -n "$e0" ] || continue
+        local j0; j0=$(ledger_job "$e0")
+        valid_jobid "$j0" && ids="${ids:+$ids,}$j0"
+    done <<< "$exps"
+    local acct_all=""
+    [ -n "$ids" ] && acct_all=$(rsh "sacct -j '$ids' -X -n -P -o JobID,State,ExitCode 2>/dev/null")
+    local out=""; local anything=0
+    while read -r e; do
+        [ -n "$e" ] || continue
+        local j; j=$(ledger_job "$e"); local s; s=$(ledger_sha "$e")
+        valid_jobid "$j" || { out+=$(printf "  %-22s %-9s %s\n" "$e" "BADLEDGER" "no usable jobid")$'\n'; anything=1; continue; }
+        local row; row=$(echo "$live" | awk -F'|' -v id="$j" '$1==id')
+        if [ -n "$row" ]; then
+            anything=1
+            out+=$(printf "  %-22s %-9s %-10s %-9s %s\n" "$e" "$(echo "$row"|cut -d'|' -f3)" \
+                   "left $(echo "$row"|cut -d'|' -f5)" "${s:0:7}" "$(echo "$row"|cut -d'|' -f6)")$'\n'
+        else
+            local st; st=$(echo "$acct_all" | awk -F'|' -v id="$j" '$1==id {print $2; exit}')
+            [ -n "$st" ] || st="UNKNOWN"
+            local id2; id2="$(ledger_sha "$e" | cut -c1-7)-$(ledger_expsha "$e")"
+            if [ "$(cat "$AE_HOME/results/$e/.harvested" 2>/dev/null | tail -1)" = "$id2" ]; then
+                [ "$quiet" = "1" ] || out+=$(printf "  %-22s %-9s %-10s %-9s harvested\n" "$e" "$st" "" "${s:0:7}")$'\n'
+            else
+                anything=1
+                out+=$(printf "  %-22s %-9s %-10s %-9s %s\n" "$e" "$st" "" "${s:0:7}" "NOT HARVESTED")$'\n'
+            fi
+        fi
+    done <<< "$exps"
+    if [ "$quiet" = "1" ] && [ "$anything" = "0" ]; then echo "no change"; return 0; fi
+    echo "== experiments =="; [ -n "$out" ] && printf "%s" "$out" || echo "  (none)"
+    echo "== standby =="; cmd_standby_list
+    local inv; inv=$(git_repo branch -a --list "*inv/*" --format='%(refname:short)' 2>/dev/null | sed "s#^$AE_REMOTE/##" | sort -u)
+    [ -n "$inv" ] && { echo "== investigations =="; echo "$inv" | sed 's/^/  /'; }
+    return 0
+}
+
+cmd_logs() {
+    load_config; ensure_link; local e="$1"; local n="${2:-60}"
+    local j; j=$(ledger_job "$e"); valid_jobid "$j" || die "no usable jobid for $e (got '$j')"
+    echo "== last $n lines of $e (job $j) -- NEVER cat these, they run to 100s of KB =="
+    rsh "tail -n $n $RROOT/out/${j}_ae-$e.out 2>/dev/null || echo '(no log yet)'"
+    echo "== per-attempt history =="
+    rsh "sacct -j $j -D -X -n -P -o State,ExitCode,Start,End,NodeList | sed 's/^/  /'"
+}
+
+# du -sk measures ALLOCATED blocks; on NFS it can report KB for a MB file, so the
+# size cap would pass anything. --apparent-size measures real bytes.
+remote_kb() { local v; v=$(rsh "du -sk --apparent-size $RROOT/results/$1 2>/dev/null | cut -f1"); echo "${v:-0}"; }
+remote_n()  { local v; v=$(rsh "ls -1 $RROOT/results/$1 2>/dev/null | wc -l"); echo "${v:-0}"; }
+
+rel_to_repo() {   # path as the agent should cite it (relative to the project repo when inside it)
+    case "$1" in "$REPO"/*) echo "${1#"$REPO"/}";; *) echo "$1";; esac
+}
+
+cmd_harvest() {
+    load_config; ensure_link
+    local targets; targets=$( [ $# -gt 0 ] && echo "$1" || ledger_exps )
+    # Batch the Slurm lookups (one squeue + one sacct), as cmd_status does.
+    local live_all; live_all=$(rsh "squeue -h -u \$USER -o '%i|%T'")
+    local hids="" e1
+    while read -r e1; do
+        [ -n "$e1" ] || continue
+        local j1; j1=$(ledger_job "$e1")
+        valid_jobid "$j1" && hids="${hids:+$hids,}$j1"
+    done <<< "$targets"
+    local acct_all=""
+    [ -n "$hids" ] && acct_all=$(rsh "sacct -j '$hids' -X -n -P -o JobID,State 2>/dev/null")
+    local res_rel; res_rel=$(rel_to_repo "$AE_HOME/results")
+    while read -r e; do
+        [ -n "$e" ] || continue
+        local ident; ident="$(ledger_sha "$e" | cut -c1-7)-$(ledger_expsha "$e")"
+        if [ "$(cat "$AE_HOME/results/$e/.harvested" 2>/dev/null | tail -1)" = "$ident" ]; then continue; fi
+        local j; j=$(ledger_job "$e")
+        if ! valid_jobid "$j"; then
+            echo "  $e: SKIPPED -- ledger has no usable jobid (got '$j'). Fix state/LEDGER.jsonl."
+            continue
+        fi
+        local live; live=$(echo "$live_all" | awk -F'|' -v id="$j" '$1==id {print $2; exit}')
+        [ -n "$live" ] && continue                       # still queued/running
+        local st; st=$(echo "$acct_all" | awk -F'|' -v id="$j" '$1==id {print $2; exit}')
+        # Settle-retry: a job can leave the queue before its last writes are visible
+        # over NFS; harvesting instantly would copy nothing and still mark it.
+        local kb n_remote
+        kb=$(remote_kb "$e/$ident"); n_remote=$(remote_n "$e/$ident")
+        if [ "$n_remote" -eq 0 ]; then
+            rsh "sleep 5"
+            kb=$(remote_kb "$e/$ident"); n_remote=$(remote_n "$e/$ident")
+        fi
+        if [ "$kb" -gt "$AE_HARVEST_MAX_KB" ]; then
+            echo "  $e: results are ${kb}KB > ${AE_HARVEST_MAX_KB}KB cap -- NOT pulling."
+            echo "     Emit a smaller summary, or raise AE_HARVEST_MAX_KB (config.sh) deliberately."
+            continue
+        fi
+        mkdir -p "$AE_HOME/results/$e"
+        rsync -aq -e ssh "$AE_HOST:$RROOT/results/$e/$ident/" "$AE_HOME/results/$e/" 2>/dev/null || true
+        rsh "tail -n 40 $RROOT/out/${j}_ae-$e.out 2>/dev/null" > "$AE_HOME/results/$e/tail.log" || true
+        # The generated script is the COMPLETE recipe (preamble + phases); bring it
+        # home so results/<expid>/ fully describes what produced it.
+        local esha2; esha2=$(ledger_expsha "$e")
+        local sha2; sha2=$(ledger_sha "$e")
+        rsh "cat $RROOT/jobs/$e-${sha2:0:7}-$esha2.sh 2>/dev/null" > "$AE_HOME/results/$e/job.sh" 2>/dev/null || true
+        [ -s "$AE_HOME/results/$e/job.sh" ] || rm -f "$AE_HOME/results/$e/job.sh"
+        # Verify before marking: a mark on a failed copy would hide the loss forever.
+        local n_local; n_local=$(ls -1 "$AE_HOME/results/$e" 2>/dev/null | grep -vcE '^(tail\.log|job\.sh|\.harvested)$')
+        if [ "$n_remote" -gt 0 ] && [ "${n_local:-0}" -eq 0 ]; then
+            echo "  $e: remote has $n_remote artefact(s) but NONE were copied -- NOT marking harvested."
+            echo "     Re-run 'ae harvest $e'. If it persists, check: rsync -e ssh $AE_HOST:$RROOT/results/$e/"
+            continue
+        fi
+        { date -u +%FT%TZ; echo "$ident"; } > "$AE_HOME/results/$e/.harvested"
+        printf -- '- %s  **%s**  %s  sha=%s  results=%s/%s/\n' \
+            "$(date -u +%F)" "$e" "$st" "$(ledger_sha "$e")" "$res_rel" "$e" >> "$STATE/FINDINGS.md"
+        echo "  harvested $e ($st, ${kb}KB, $n_remote artefact(s)) -> results/$e/  [FINDINGS.md updated]"
+    done <<< "$targets"
+}
+
+# --- tinkering -------------------------------------------------------------
+cmd_investigate() {
+    load_config; require_branch
+    local id="$1"; shift
+    local brief_dir="$AE_HOME/inv/$id"; mkdir -p "$brief_dir"
+    if [ ! -f "$brief_dir/brief.md" ]; then
+        sed "s/{{ID}}/$id/g; s/{{QUESTION}}/${*:-<fill in>}/g" \
+            "$AE_DIR/templates/inv.md" > "$brief_dir/brief.md"
+    fi
+    git_repo show-ref --verify --quiet "refs/heads/inv/$id" \
+        || git_repo branch "inv/$id" "$AE_BRANCH"
+    git_repo push -q "$AE_REMOTE" "inv/$id:inv/$id" 2>/dev/null || true
+    echo "investigation '$id'"
+    echo "  brief:  $brief_dir/brief.md   <-- EDIT THIS, then: ae launch $id"
+    echo "  branch: inv/$id (pushed)"
+}
+
+# The tinker's least-privilege allowlist, rendered for THIS project: the deny list
+# names the authoritative branch, so an agent can never push to it.
+render_permissions() {   # -> path of a rendered copy
+    local out; out=$(mktemp)
+    sed "s/{{AUTH_BRANCH}}/$AE_BRANCH/g; s/{{REMOTE}}/$AE_REMOTE/g" "$AE_DIR/lib/tinker-permissions.json" > "$out"
+    python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$out" 2>/dev/null || { rm -f "$out"; die "rendered tinker-permissions.json is not valid JSON"; }
+    echo "$out"
+}
+
+cmd_launch() {
+    load_config; ensure_link
+    local id="" j="" tier="$AE_DBG_CPU_NAME"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --jobid) j="$2"; shift 2;;
+            --gpu)   tier="$AE_DBG_NAME,$AE_DBG_GEN_NAME"; shift;;   # either GPU pool
+            --gen)   tier="$AE_DBG_GEN_NAME"; shift;;                  # force the second pool
+            --preempt) tier="$AE_DBG_NAME"; shift;;
+            *)       id="$1"; shift;;
+        esac
+    done
+    local brief="$AE_HOME/inv/$id/brief.md"
+    [ -f "$brief" ] || die "no brief at $brief (run: ae investigate $id)"
+    # Default: the OLDEST running standby (safest under youngest_first preemption).
+    # --jobid reuses an allocation you already hold instead of waiting.
+    [ -n "$j" ] || j=$(oldest_dbg "$tier")
+    if [ -z "$j" ]; then
+        info "no RUNNING standby in tier '$tier' -- topping up the pool"
+        cmd_pool >/dev/null 2>&1
+        j=$(oldest_dbg "$tier")
+    fi
+    [ -n "$j" ] || die "no RUNNING standby in tier '$tier' (submitted more; they need to schedule).
+    Retry shortly, or reuse an allocation you already hold: ae launch $id --jobid <JOBID>"
+
+    local perms; perms=$(render_permissions)
+    local agentf; agentf=$(mktemp); printf '%s\n' "$AE_AGENT_CMD" > "$agentf"
+    rsh "mkdir -p $RROOT/inv/$id"
+    rscp "$brief" "$AE_HOST:$RROOT/inv/$id/brief.md"
+    rscp "$AE_DIR/lib/tinker-bootstrap.md" "$AE_HOST:$RROOT/inv/$id/bootstrap.md"
+    rscp "$AE_DIR/lib/tinker-launch.sh" "$AE_HOST:$RROOT/tinker-launch.sh"
+    rscp "$perms" "$AE_HOST:$RROOT/tinker-permissions.json"
+    rscp "$agentf" "$AE_HOST:$RROOT/agent-cmd"
+    rm -f "$perms" "$agentf"
+    rsh "chmod +x $RROOT/tinker-launch.sh"
+
+    # Dev worktree on the investigation branch. Always hard-reset to the pushed
+    # branch: never trust whatever a previous, possibly preempted, agent left.
+    # (If origin/inv/<id> already exists -- e.g. a merged tree you pushed there --
+    # the agent starts from it.)
+    rsh "set -e
+         cd $RREPO && git fetch -q $AE_REMOTE
+         W=$RROOT/work/$id
+         if [ ! -d \"\$W\" ]; then git worktree add -q \"\$W\" -B inv/$id $AE_REMOTE/inv/$id; fi
+         cd \"\$W\" && git fetch -q $AE_REMOTE && git reset -q --hard $AE_REMOTE/inv/$id
+         echo \"  worktree \$W @ \$(git rev-parse --short HEAD)\""
+
+    # srun --overlap puts the agent inside the standby allocation (its cgroup, its
+    # GPU); tmux detaches it from this ssh so it survives the connection closing.
+    rsh "srun --jobid=$j --overlap $RROOT/tinker-launch.sh $id $RROOT"
+    echo "  read report: ae report $id"
+    echo "  attach:      ssh -t $AE_HOST \"srun --jobid=$j --overlap --pty tmux -L ae-$j attach -t ae-host\"  (window: $id)"
+}
+
+cmd_report() {
+    load_config; ensure_link; local id="$1"
+    echo "== report: inv/$id =="
+    rsh "cat $RROOT/work/$id/.ae-report.md 2>/dev/null || echo '(agent has not written a report yet)'"
+    echo "== commits on inv/$id =="
+    git_repo fetch -q "$AE_REMOTE" "inv/$id:refs/remotes/$AE_REMOTE/inv/$id" 2>/dev/null || true
+    git_repo log --oneline "$AE_BRANCH..$AE_REMOTE/inv/$id" 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+}
+
+cmd_accept() {
+    load_config; require_branch; ensure_link; local id="$1"
+    git_repo fetch -q "$AE_REMOTE" "inv/$id:refs/remotes/$AE_REMOTE/inv/$id" || die "cannot fetch inv/$id"
+    local n; n=$(git_repo rev-list --count "$AE_BRANCH..$AE_REMOTE/inv/$id")
+    [ "$n" -gt 0 ] || die "inv/$id has no commits beyond $AE_BRANCH -- nothing to accept"
+    info "squash-merging $n commit(s) from inv/$id"
+    git_repo merge --squash "$AE_REMOTE/inv/$id" || die "merge conflict -- resolve, then: git commit"
+    git_repo commit -q -m "accept inv/$id" || die "nothing staged"
+    git_repo push -q "$AE_REMOTE" "HEAD:$AE_BRANCH" || die "push failed"
+    echo "accepted inv/$id -> $AE_BRANCH @ $(git_repo rev-parse --short HEAD)"
+    echo "  branch inv/$id kept as the archive (WIP history preserved there)"
+}
+
+cmd_wait() {
+    load_config; ensure_link
+    local what="$1" secs="${2:-600}" t=0
+    local j; j=$(ledger_job "$what")
+    valid_jobid "$j" || die "no usable jobid for '$what' in the ledger (got '$j')"
+    while [ $t -lt "$secs" ]; do
+        local st; st=$(rsh "squeue -h -j $j -o %T 2>/dev/null" | head -1)
+        [ -z "$st" ] && { echo "$what: left the queue after ${t}s"; \
+                          rsh "sacct -j $j -X -n -P -o State,ExitCode,Elapsed" | sed 's/^/  /'; return 0; }
+        sleep 15; t=$((t+15))
+    done
+    echo "$what: STILL $(rsh "squeue -h -j $j -o %T" | head -1) after ${secs}s (observation timeout, not a failure)"
+    return 2
+}
+
+cmd_tinker() {
+    # One-shot: create the branch, take the brief on stdin, launch.
+    local id="$1"; shift
+    local tierflag=""
+    case "${1:-}" in --gpu|--gen|--preempt) tierflag="$1"; shift;; esac
+    cmd_investigate "$id" "$@" >/dev/null
+    if [ ! -t 0 ]; then cat > "$AE_HOME/inv/$id/brief.md"; fi
+    [ -s "$AE_HOME/inv/$id/brief.md" ] || die "empty brief; pipe one in:  ae tinker $id < brief.md"
+    cmd_launch "$id" $tierflag
+}
+
+cmd_prune() {
+    # Pinned worktrees are one per (expid, sha) and are never reclaimed on their own.
+    # Remove only those whose experiment is (a) not live in Slurm and (b) already
+    # harvested, so a running or un-collected experiment can never lose its code.
+    load_config; ensure_link
+    local go=0; [ "${1:-}" = "--yes" ] && go=1
+    local live; live=$(rsh "squeue -h -u \$USER -o %j")
+    local keep=""
+    local e
+    while read -r e; do
+        [ -n "$e" ] || continue
+        if echo "$live" | grep -qx "ae-$e"; then keep="$keep $e(live)"; continue; fi
+        local id3; id3="$(ledger_sha "$e" | cut -c1-7)-$(ledger_expsha "$e")"
+        [ "$(cat "$AE_HOME/results/$e/.harvested" 2>/dev/null | tail -1)" = "$id3" ] || { keep="$keep $e(unharvested)"; continue; }
+    done <<< "$(ledger_exps)"
+    echo "== pinned worktrees under $RROOT/code =="
+    local dirs; dirs=$(rsh "ls -1 $RROOT/code 2>/dev/null")
+    local rm_list=""
+    while read -r d; do
+        [ -n "$d" ] || continue
+        local ex="${d%-*}"                      # strip the -<shortsha> suffix
+        if echo "$keep" | grep -q "\b$ex("; then echo "  KEEP   $d  (live or unharvested)"
+        else echo "  REMOVE $d"; rm_list="$rm_list $d"; fi
+    done <<< "$dirs"
+    [ -n "$rm_list" ] || { echo "  nothing to prune"; return 0; }
+    if [ "$go" != "1" ]; then
+        echo "  (dry run -- rerun as 'ae prune --yes' to remove; $(rsh "du -sh --apparent-size $RROOT/code 2>/dev/null | cut -f1") currently used)"
+        return 0
+    fi
+    local d
+    for d in $rm_list; do
+        rsh "git -C $RREPO worktree remove --force $RROOT/code/$d 2>/dev/null || rm -rf $RROOT/code/$d"
+        echo "  removed $d"
+    done
+    rsh "git -C $RREPO worktree prune"
+    echo "  now: $(rsh "du -sh --apparent-size $RROOT/code 2>/dev/null | cut -f1")"
+}
+
+cmd_help() { sed -n '3,9p' "$0"; cat <<'H'
+
+SETUP / HEALTH
+  ae paths                       where harness, workspace, repo and config resolve (offline)
+  ae init                        create missing workspace docs + config.sh from templates (never overwrites)
+  ae setup                       one-time: create the remote layout, verify everything
+  ae doctor                      health check (ssh, git, slurm, quota, standby)
+
+STANDBY CAPACITY
+  ae pool [cpu|gpu|gen|all]      keep standby warm; default every configured tier
+                                 cpu = CPU-only QOS (fast to schedule; default tinker tier)
+                                 gpu = GPU standby on AE_PARTITION
+                                 gen = GPU standby on AE_PARTITION_GEN (if configured)
+  ae pool <ncpu> [ngpu]          numeric shorthand: CPU (and GPU) tiers only
+  ae attach [cpu|gpu|gen]        print the command to shell into the oldest RUNNING standby
+
+EXPERIMENTS
+  ae submit <expid> [--after a,b] [--allow-dirty] [--replace]
+  ae status [--changed]          derived from squeue/sacct; --changed is quiet if idle
+  ae logs <expid> [n]            tail a slice of the job log + per-attempt history
+  ae harvest [expid]             pull distillates back; appends to state/FINDINGS.md
+  ae wait <expid> [secs]         bounded poll until it leaves the queue (default 600s)
+  ae cancel <expid>
+  ae prune [--yes]               reclaim pinned worktrees of finished+harvested runs
+
+TINKERING
+  ae tinker <id> [--gpu|--gen|--preempt] < brief.md
+                                 ONE STEP: branch + brief + launch agent
+  ae investigate <id> [question] create branch inv/<id> + a brief to edit
+  ae launch <id> [--gpu] [--jobid J]   start a compute-side agent on the brief
+  ae report <id>                 read its report + commits
+  ae accept <id>                 squash-merge into the authoritative branch
+
+MONITORING (no agent tokens; see README)
+  ae-watch [--once]              print one event line when a job fails or completes
+  ae-capacity [hours]            measured GPU-hours, waits, preemptions per partition
+H
+}
+
+case "${1:-help}" in
+    paths) shift; cmd_paths "$@";;
+    init) shift; cmd_init "$@";;
+    setup) shift; cmd_setup "$@";;
+    doctor) shift; cmd_doctor "$@";;
+    pool) shift; cmd_pool "$@";;
+    attach) shift; cmd_attach "$@";;
+    submit) shift; cmd_submit "$@";;
+    cancel) shift; cmd_cancel "$@";;
+    status) shift; cmd_status "$@";;
+    logs) shift; cmd_logs "$@";;
+    harvest) shift; cmd_harvest "$@";;
+    investigate) shift; cmd_investigate "$@";;
+    launch) shift; cmd_launch "$@";;
+    report) shift; cmd_report "$@";;
+    accept) shift; cmd_accept "$@";;
+    prune) shift; cmd_prune "$@";;
+    wait) shift; cmd_wait "$@";;
+    tinker) shift; cmd_tinker "$@";;
+    help|-h|--help) cmd_help;;
+    *) die "unknown command '$1' (try: ae help)";;
+esac

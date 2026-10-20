@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# MOCK sinfo: no-op
+exit 0
