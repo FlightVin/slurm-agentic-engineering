@@ -25,7 +25,8 @@ echo "print('hello')" > "$P/main.py"; git -C "$P" add -A; $G -C "$P" commit -q -
 git -C "$P" remote add origin "$T/origin.git"; git -C "$P" push -q origin work
 git clone -q -b work "$T/origin.git" "$MOCK_REMOTE_HOME/projrepo"
 
-# harness inserted into the project, workspace inside it (the default layout)
+# harness inserted into the project, workspace inside it (the default layout);
+# config = the shipped Babel defaults + the per-project values + the mock host only
 cp -R "$H" "$P/slurm-agentic-engineering"; rm -rf "$P/slurm-agentic-engineering/.git"
 echo "slurm-agentic-engineering/" >> "$P/.git/info/exclude"
 AE="$P/slurm-agentic-engineering/bin/ae"; WS="$P/slurm-agentic-engineering"
@@ -36,7 +37,6 @@ echo "== init + config"
 expect "project CLAUDE.md imports the in-project agent.md" 'grep -q "@slurm-agentic-engineering/agent.md" "$P/CLAUDE.md"'
 cat >> "$WS/config.sh" <<'EOF'
 AE_HOST="mockcluster"; AE_REMOTE_REPO='$HOME/projrepo'; AE_BRANCH="work"
-AE_PARTITION="pre"; AE_QOS_GPU="pre_gpu"; AE_QOS_CPU="pre_cpu"
 EOF
 out=$("$AE" paths); expect "paths: repo is the project, workspace is the harness dir" 'grep -q "project repo (REPO): $P" <<<"$out" && grep -q "workspace (AE_HOME): $WS" <<<"$out"'
 "$AE" setup >/dev/null 2>&1; expect "setup creates the remote layout" '[ -d "$MOCK_REMOTE_HOME/ae/jobs" ] && [ -d "$MOCK_REMOTE_HOME/ae/code" ]'
@@ -51,7 +51,7 @@ git -C "$P" checkout -q -- main.py
 echo "== submit the self-test pair"
 out=$("$AE" submit ae-smoke 2>&1); rc=$?; echo "$out" | sed 's/^/        /'
 expect "ae-smoke submitted" '[ $rc -eq 0 ] && grep -q "^submitted ae-smoke " <<<"$out"'
-expect "gpus=0 routed to the CPU QOS" 'grep -q "qos=pre_cpu" <<<"$out"'
+expect "gpus=0 routed to the Babel CPU QOS" 'grep -q "qos=preempt_cpu_qos" <<<"$out"'
 sha=$(git -C "$P" rev-parse HEAD)
 expect "ledger line written with sha + expsha" 'grep -q "\"expid\":\"ae-smoke\".*\"sha\":\"$sha\".*\"expsha\":\"[0-9a-f]\{12\}\"" "$WS/state/LEDGER.jsonl"'
 expect "pinned detached worktree exists at the sha" '[ "$(git -C "$MOCK_REMOTE_HOME/ae/code/ae-smoke-${sha:0:7}" rev-parse HEAD)" = "$sha" ]'
@@ -87,5 +87,10 @@ out=$("$AE" submit ae-smoke --replace 2>&1); new=$(grep -o 'recipe=[0-9a-f]*' <<
 old=$(grep '"expid":"ae-smoke"' "$WS/state/LEDGER.jsonl" | head -1 | sed 's/.*"expsha":"\([^"]*\)".*/\1/')
 expect "editing the recipe changes expsha at the same project sha" '[ -n "$new" ] && [ "$new" != "$old" ]'
 expect "project tree still clean (workspace never dirties the project)" '[ -z "$(git -C "$P" status --porcelain)" ]'
+
+echo "== Babel second pool routing"
+out=$("$AE" submit ae-smoke-gen 2>&1)
+expect "part=general -> general partition, normal QOS, 1 GPU" 'grep -q "^submitted ae-smoke-gen .*part=general  qos=normal  gpus=1" <<<"$out"'
+expect "generated job carries the general partition + GRES" 'grep -q "^#SBATCH -p general" "$MOCK_REMOTE_HOME"/ae/jobs/ae-smoke-gen-*.sh && grep -q "^#SBATCH --gres=gpu:1" "$MOCK_REMOTE_HOME"/ae/jobs/ae-smoke-gen-*.sh'
 
 [ $fail -eq 0 ] && echo "PASS" || { echo "FAIL"; exit 1; }

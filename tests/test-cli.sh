@@ -32,7 +32,7 @@ expect "harness dir untouched by offline commands" '[ ! -e "$H/state" ] && [ ! -
 
 echo "== init"
 out=$("$AE" init 2>&1); rc=$?; expect "ae init exits 0" '[ $rc -eq 0 ]'
-for f in config.sh PROJECT.md cluster/CARD.md state/STATE.md state/CHECKLIST.md state/FINDINGS.md \
+for f in config.sh PROJECT.md cluster/CARD.md cluster/BABEL.md state/STATE.md state/CHECKLIST.md state/FINDINGS.md \
          state/DECISIONS.md state/IMPLEMENTATION-LOG.md; do
     expect "init created $f" '[ -f "$W/$f" ]'
 done
@@ -41,12 +41,18 @@ expect "CLAUDE.md pointer resolves" 'ref=$(grep -o "@[^ ]*agent.md" "$P/CLAUDE.m
 out=$("$AE" init 2>&1); expect "second ae init changes nothing" '! grep -qE "^  (create|reset) " <<<"$out"'
 
 echo "== config validation"
-out=$("$AE" status 2>&1); rc=$?; expect "empty required config is refused" '[ $rc -ne 0 ] && grep -q "AE_HOST is not set" <<<"$out"'
+out=$("$AE" status 2>&1); rc=$?; expect "empty per-project config is refused" '[ $rc -ne 0 ] && grep -q "AE_REMOTE_REPO is not set" <<<"$out"'
 cat >> "$W/config.sh" <<'EOF'
 AE_HOST="fakehost"; AE_REMOTE_REPO='$HOME/p'; AE_BRANCH="work"
-AE_PARTITION="part"; AE_QOS_GPU="qg"; AE_QOS_CPU="qc"; AE_PARTITION_GEN="gen"
+AE_PARTITION="part"; AE_QOS_GPU="qg"; AE_QOS_CPU="qc"; AE_PARTITION_GEN="gen"; AE_QOS_GEN=""
 EOF
 out=$("$AE" status 2>&1); rc=$?; expect "second pool without its QOS is refused" '[ $rc -ne 0 ] && grep -q "AE_PARTITION_GEN is set but AE_QOS_GEN is not" <<<"$out"'
+
+echo "== Babel defaults (config.example.sh)"
+out=$(bash -c 'set -u; . "$1"; echo "$AE_HOST $AE_PARTITION $AE_QOS_GPU $AE_QOS_CPU $AE_PARTITION_GEN $AE_QOS_GEN $AE_MAX_GPUS_PER_USER $AE_GEN_MAX_GPUS $AE_GEN_MAX_SECONDS $AE_DBG_POOL $AE_DBG_GEN_POOL"' _ "$H/config.example.sh")
+expect "template carries Babel's pools, QOSes and caps" '[ "$out" = "babel preempt preempt_qos preempt_cpu_qos general normal 24 8 172800 2 2" ]'
+expect "only the per-project values are blank" '[ "$(grep -cE "^AE_[A-Z_]+=(\"\"|'"''"')" "$H/config.example.sh")" -eq 2 ]'
+expect "init installed the Babel card + reference" 'grep -q "^# Babel cluster card" "$W/cluster/CARD.md" && grep -q "^# Babel SLURM Reference" "$W/cluster/BABEL.md"'
 
 echo "== permissions template"
 r=$(sed "s/{{AUTH_BRANCH}}/work/g; s/{{REMOTE}}/origin/g" "$H/lib/tinker-permissions.json")

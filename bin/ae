@@ -185,6 +185,24 @@ cmd_doctor() {
     rsh "echo '  slurm: '\$(sinfo --version); echo '  qos:   '\$(sacctmgr -n -s show user \$USER format=QOS%60 | tr -s ' '); \
          cd $RREPO 2>/dev/null && echo '  repo:  '\$(git rev-parse --abbrev-ref HEAD)' @ '\$(git rev-parse --short HEAD) || echo '  repo:  MISSING ($RREPO)'; \
          echo '  remote: '\$(git -C $RREPO ls-remote --heads $AE_REMOTE $AE_BRANCH 2>&1 | head -1 | cut -c1-60)"
+    echo "== qos (live vs config.sh) =="
+    # Quotas drift; config.sh caches them. Print Slurm's live values next to ours so a
+    # change is visible, and flag a configured QOS this user does not hold. maxlab*
+    # QOSes pass a dry run on Babel but never schedule in practice (cluster/BABEL.md
+    # Addendum A), so they are named as ignored rather than suggested.
+    local held q; held=$(rsh "sacctmgr -n -s show user \$USER format=QOS%200" | tr ', ' '\n\n' | grep -v '^$' | sort -u)
+    for q in "$AE_QOS_GPU" "$AE_QOS_CPU" ${AE_QOS_GEN:+"$AE_QOS_GEN"}; do
+        if grep -qx "$q" <<<"$held"; then info "held:    $q"
+        else info "MISSING: $q is in config.sh but not in your Slurm association"; fi
+    done
+    rsh "sacctmgr -n -P show qos $AE_QOS_GPU,$AE_QOS_CPU${AE_QOS_GEN:+,$AE_QOS_GEN} format=Name,MaxTRESPU,MaxSubmitPU,MaxJobsPU,MinTRES" \
+        | sed 's/^/  live:    /'
+    info "config:  $AE_QOS_GPU gpu<=$AE_MAX_GPUS_PER_USER submit<=$AE_MAX_SUBMIT$(has_gen && echo "; $AE_QOS_GEN gpu<=$AE_GEN_MAX_GPUS submit<=$AE_GEN_MAX_SUBMIT running<=${AE_GEN_MAX_RUNNING:-?}")"
+    if grep -q '^maxlab' <<<"$held"; then info "note:    maxlab* QOSes are held but do not schedule in practice -- ignore them"; fi
+    echo "== storage =="
+    # The login node sees /home only; /data/user_data mounts on compute nodes alone,
+    # so audit it from a CPU job, never from here.
+    rsh "df -h \$HOME | tail -1" | awk '{print "  home:    "$3" used / "$2" ("$5"), "$4" free"}'
     echo "== capacity =="
     local g; g=$(rsh "squeue -h -u \$USER -t R,PD -o '%b' | grep -o 'gpu:[0-9]*' | cut -d: -f2 | paste -sd+ - | bc 2>/dev/null")
     info "gpus in flight: ${g:-0} / ${AE_MAX_GPUS_PER_USER:-?}"
@@ -333,7 +351,7 @@ QOSMaxGRESPerUser until one frees. That is expected for a fleet larger than the 
         info "part=$part but no second pool is configured -> $AE_PARTITION"; part="$AE_PARTITION"
     fi
     if [ "$gpus" = "0" ]; then
-        [ "$part" != "$AE_PARTITION" ] && info "gpus=0 cannot run on $part -- routing to $AE_QOS_CPU"
+        [ "$part" != "$AE_PARTITION" ] && info "gpus=0 cannot run on $part (its QOS has MinTRES=gres/gpu=1) -- routing to $AE_QOS_CPU"
         partition="$AE_PARTITION"; qos="$AE_QOS_CPU"; gres=""
     else
         if [ "$part" = "auto" ]; then
@@ -356,7 +374,8 @@ QOSMaxGRESPerUser until one frees. That is expected for a fleet larger than the 
             partition="$AE_PARTITION_GEN"; qos="$AE_QOS_GEN"; gres="--gres=gpu:${gtype:+$gtype:}$gpus"
             if [ "${AE_GEN_MAX_SECONDS:-0}" -gt 0 ] && [ "${secs:-0}" -gt "$AE_GEN_MAX_SECONDS" ]; then
                 die "time=$tlim exceeds $AE_PARTITION_GEN's max wall (${AE_GEN_MAX_SECONDS}s).
-    Use part=$AE_PARTITION (requeue-safe) or a shorter time."
+    Prototype on $AE_PARTITION_GEN with a shorter time, then run the full job on
+    part=$AE_PARTITION (long wall, requeue-safe)."
             fi
         else
             partition="$AE_PARTITION"; qos="$AE_QOS_GPU"; gres="--gres=gpu:${gtype:+$gtype:}$gpus"

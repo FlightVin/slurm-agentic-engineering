@@ -6,19 +6,24 @@ Only two things:
   data lives, what a finished experiment must emit. This is the plug-in point.
 - **`exp/<expid>.sh`** — one per experiment, ~15 lines, from `templates/exp.sh`.
 
-Optionally `config.sh` if the cluster or your branch name changes. Nothing else.
+Plus two values in `config.sh` (`AE_REMOTE_REPO`, `AE_BRANCH`); the rest of it is Babel's
+measured configuration. Edit more only if Babel's quotas change (`ae doctor` shows live values)
+or you port to another cluster. Nothing else.
 
 ## 2. One-time setup
 Once per project and laptop:
 1. `~/.ssh/config` — `ControlMaster auto`, `ControlPath ~/.ssh/cm-%r@%h:%p`,
-   `ControlPersist 10m`, `ServerAliveInterval 15`, plus a `Host <cluster>-*` wildcard for compute nodes.
+   `ControlPersist 10m`, `ServerAliveInterval 15`, plus a `Host babel-*` wildcard for compute nodes.
    **Mandatory**: unmultiplexed auth measured 5–31 s per command.
 2. Keep the harness out of the project's history: add `slurm-agentic-engineering/` and
    `.claude/settings.local.json` to the project's `.git/info/exclude` (or `.gitignore`).
-3. `ae init` — creates the workspace documents and `config.sh` from templates.
+3. `ae init` — creates the workspace documents (incl. the Babel `cluster/CARD.md` and
+   `cluster/BABEL.md`) and `config.sh` from templates; set `AE_REMOTE_REPO` and `AE_BRANCH`.
 4. `ae setup` — creates `~/ae/{jobs,code,work,out,results,inv}` on the cluster and
-   verifies ssh, git remote access, Slurm and quota.
+   verifies ssh, git remote access, the QOSes you hold, live quotas vs `config.sh`, and /home space.
 5. `ae pool cpu` — brings up standby capacity.
+6. Self-tests: `ae submit ae-smoke && ae submit ae-smoke-dep --after ae-smoke`, and
+   `ae submit ae-smoke-gen` for the general pool.
 
 ## 3. What command starts the orchestrator?
 ```
@@ -90,11 +95,15 @@ they need no babysitting. Judgement calls go to `state/DECISIONS.md`.
 `no change` when nothing is new, so idle wakes are cheap.
 
 ## 10. How does standby work?
-`ae pool` keeps **2 CPU** standby (`~5 s` to schedule, 0 GPUs, separate quota —
-effectively free) and GPU standby only when a tinker needs one (it uses GPU quota). Tinkering
+Three tiers on Babel: **CPU** (`preempt_cpu_qos`, ~5 s to schedule on a quiet queue, up to an hour+
+when busy, 0 GPUs, separate quota —
+effectively free), **preempt GPU** (2.5–3.5 h typical, 1 of 24 GPUs) and **general GPU** (varies
+from seconds to days, 1 of 8 GPUs, never preempted). `ae pool cpu` keeps 2 CPU standby and is the
+routine call; plain `ae pool` also holds 2 GPU standby in each pool, so whichever pool wins the race
+serves `--gpu` — use it when GPU tinkering is expected, since it holds 4 GPUs of quota. Tinkering
 defaults to CPU. Each holds a long-lived tmux server that agents attach to as
 windows. `--requeue` means a preempted standby returns under the same JobID by
-itself; `ae pool` only tops up after a terminal end (12 h CPU / 24 h GPU walltime),
+itself; `ae pool` only tops up after a terminal end (12 h CPU / 24 h preempt GPU / 2 days general),
 and `ae launch` tops up automatically if no standby is running.
 
 ## 11. What happens after preemption/reboot?

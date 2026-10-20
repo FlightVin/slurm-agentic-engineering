@@ -13,9 +13,8 @@ audits look like at the end of a long study; copy patterns, not content.
 | `findings-example.md` | append-only `FINDINGS.md`, including dated CORRECTION entries |
 | `implementation-log-example.md` | `IMPLEMENTATION-LOG.md`: machinery lessons (permissions, NFS, ...) |
 | `decisions-example.md`, `sweep-ledger-example.md` | small decision log; a hyper-parameter sweep ledger |
-| `cluster/card-example-babel.md` | a filled-in `cluster/CARD.md` for a real two-pool cluster |
-| `cluster/reference-babel.md` | the long cluster reference that card points to (grep, never load) |
-| `cluster/config-babel.sh` | a filled-in `config.sh` for that cluster (two pools, CPU QOS) |
+| `cluster/card-example-babel.md` | one project's `cluster/CARD.md` at the end of a study, with its project-specific notes (the harness's own Babel card is `templates/project/cluster/CARD.md`; the reference moved to `templates/project/cluster/BABEL.md`) |
+| `cluster/config-babel.sh` | that project's filled-in `config.sh` (same Babel values as `config.example.sh`, plus its repo/branch and a raised harvest cap) |
 | `exp/sim-*.sh` | a validated diamond DAG (pretrain → two midtrains → report) that survived a real preemption |
 | `exp/v8ws-*.sh` | production experiment definitions: training, sweep points, dev scoring, teacher cache, selection, audits, final report build |
 | `briefs/*.md` | tinker briefs, each with Objective / Do NOT / exact success command |

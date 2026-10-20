@@ -91,14 +91,17 @@ Three details that are load-bearing:
 
 ## Standby capacity — the tradeoff, stated
 
-Warm capacity removes queue latency but consumes quota. Measured on one site (see
-examples/cluster/): CPU standby reached RUNNING in **~5 s**; GPU standby in **2.5–3.5 h**.
+Warm capacity removes queue latency but consumes quota. Measured on Babel (see
+`cluster/CARD.md`): CPU standby reached RUNNING in **~5 s** on a quiet queue (over an hour on a
+busy one); preempt GPU standby in **2.5–3.5 h**;
+general GPU standby anywhere from seconds to days.
 
 So: keep **2 CPU standby** (0 GPUs, separate quota pool — effectively free) and
-**GPU standby only when needed** (it counts against the GPU quota). Tinkering defaults to CPU because most code and data
+**GPU standby only when needed** (it counts against the GPU quota) — then in *both* GPU pools
+(`ae pool`), because which one schedules first varies hour to hour. Tinkering defaults to CPU because most code and data
 work needs no GPU; `ae tinker <id> --gpu` opts in and expects to wait.
 
 Standby self-heals: `--requeue` means a preempted standby returns to PENDING
 under the same JobID and comes back on a new node by itself. `ae pool` only tops
-up after a *terminal* end (the walltime: 12 h for the CPU tier, 24 h for GPU),
+up after a *terminal* end (the walltime: 12 h CPU, 24 h preempt GPU, 2 days general GPU),
 and `ae launch` tops the pool up automatically if it finds none running.

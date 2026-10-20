@@ -1,8 +1,12 @@
 # Babel SLURM Reference
 
 **Cluster:** `babel` — CMU, SLURM **26.05.1**
-**User:** `vineethb` (uid 6010497) · **Account:** `msimchow` · lineage `/mld/msimchow/0-vineethb/`
+**User:** `<user>` · **Account:** `<account>` (measured under one lab account; your QOS set and fairshare may differ — `ae doctor` shows yours)
 **Analysis date:** 2026-09-17
+
+> Shipped with slurm-agentic-engineering as the Babel reference. It was measured from one research
+> project, so script and job names below (`naivepoker_*`, `~/scripts/...`) are that project's; the
+> cluster facts are general. Addenda A/B and `cluster/CARD.md` supersede §3 on the `general` pool.
 
 **Scope note.** This document covers only the two submission paths that actually work:
 `~/scripts/interactive_job.sh` and the single-GPU training submit script
@@ -39,10 +43,10 @@ and read locally.
 
 | | |
 |---|---|
-| **Login** | `ssh babel` → `login.babel.cs.cmu.edu`, user `vineethb`, key `~/.ssh/id_ed25519` |
+| **Login** | `ssh babel` → `login.babel.cs.cmu.edu`, user `<user>`, key `~/.ssh/id_ed25519` |
 | **Partition we use** | `preempt` (the cluster default — 128 nodes, 980 GPUs) |
 | **QOS we use** | `preempt_qos` (GPU jobs) · `preempt_cpu_qos` (CPU-only jobs) |
-| **Account** | `msimchow` |
+| **Account** | `<account>` |
 | **GPU quota** | **24 GPUs** concurrently (`preempt_qos`) |
 | **CPU quota** | 256 CPUs/job (`preempt_qos`) · 32 CPUs/job, 64 total (`preempt_cpu_qos`) |
 | **Job quota** | 24 running / 100 submitted (`preempt_qos`) |
@@ -67,7 +71,7 @@ From `~/.ssh/config` on the local machine:
 ```sshconfig
 Host babel
     HostName login.babel.cs.cmu.edu
-    User vineethb
+    User <user>
     IdentityFile ~/.ssh/id_ed25519
     Compression no
     ForwardAgent yes
@@ -75,7 +79,7 @@ Host babel
 
 Host babel-compute-node
     HostName babel-y9-16
-    User vineethb
+    User <user>
     IdentityFile ~/.ssh/id_ed25519
     ProxyJump babel
     StrictHostKeyChecking no
@@ -95,8 +99,8 @@ session. The reliable way into a running job is `srun` (§6.1), not SSH.
 
 ```
 $ id
-uid=6010497(vineethb) gid=6010497(vineethb)
-groups=6010497(vineethb),500(hpcuser),60057(mld),60113(msimchow_group),
+uid=<uid>(<user>) gid=<uid>(<user>)
+groups=<uid>(<user>),500(hpcuser),60057(mld),60113(<account>_group),
        60164(maxlab),60171(nas5_home),60185(nas5_usrdata)
 ```
 
@@ -107,8 +111,8 @@ so **group membership is never the thing blocking a submission** — QOS is (§3
 
 | Path | What | Shared across nodes? |
 |---|---|---|
-| `/home/vineethb` | home, scripts, job logs (`~/job_outs`) | **Yes** |
-| `/data/user_data/vineethb` | datasets, runs, checkpoints, conda envs | **Yes** |
+| `/home/<user>` | home, scripts, job logs (`~/job_outs`) | **Yes** |
+| `/data/user_data/<user>` | datasets, runs, checkpoints, conda envs | **Yes** |
 | `/tmp` on a compute node | scratch | **No — node-local** |
 
 This matters directly for preemption: a requeued job lands on a **different node**, so anything it
@@ -144,18 +148,18 @@ PartitionName=general
    AllowGroups=hpcuser AllowAccounts=ALL AllowQos=normal
    ...
 
-$ sacctmgr -s show user vineethb format=User,Account,QOS,DefaultQOS
+$ sacctmgr -s show user <user> format=User,Account,QOS,DefaultQOS
 User     |Account |QOS                                                        |Def QOS
-vineethb |msimchow|maxlab_cpu_qos,maxlab_qos,preempt_cpu_qos,preempt_qos      |preempt_qos
+<user> |<account>|maxlab_cpu_qos,maxlab_qos,preempt_cpu_qos,preempt_qos      |preempt_qos
 ```
 
 Confirmed by dry run — this is a hard association rejection, not a queueing problem:
 
 ```
-$ sbatch --test-only -p general -q normal -A msimchow --gres=gpu:1 -t 1:00:00 --wrap=hostname
+$ sbatch --test-only -p general -q normal -A <account> --gres=gpu:1 -t 1:00:00 --wrap=hostname
 allocation failure: Invalid qos specification
 
-$ sbatch --test-only -p general -A msimchow --gres=gpu:1 -t 1:00:00 --wrap=hostname
+$ sbatch --test-only -p general -A <account> --gres=gpu:1 -t 1:00:00 --wrap=hostname
 allocation failure: Invalid qos specification
 ```
 
@@ -166,16 +170,16 @@ The accounting transaction log shows this was a **provisioning choice at account
 not a limit we tripped:
 
 ```
-$ sacctmgr show transaction where accounts=msimchow format=Time,Action,Actor,Where,Info
-2026-08-28T14:13:11|Add Associations|root|id_assoc=1352| acct='msimchow', user='vineethb',
-    lineage='/mld/msimchow/0-vineethb/', def_qos_id=2, qos=',63,41,71,2,'
+$ sacctmgr show transaction where accounts=<account> format=Time,Action,Actor,Where,Info
+2026-08-28T14:13:11|Add Associations|root|id_assoc=1352| acct='<account>', user='<user>',
+    lineage='/mld/<account>/0-<user>/', def_qos_id=2, qos=',63,41,71,2,'
 ```
 
 QOS IDs (`sacctmgr show qos format=ID,Name`): `2=preempt_qos`, `41=maxlab_qos`,
 `63=maxlab_cpu_qos`, `71=preempt_cpu_qos`. **ID `1` (`normal`) is absent.**
 
 By contrast `ndelara`, added to the same account on 2026-09-03, got `qos=',63,41,1,71,2,42,'` —
-including `1`. Two other msimchow members (`awu5`, `ataracha`) are in the same position as us.
+including `1`. Two other <account> members (`awu5`, `ataracha`) are in the same position as us.
 
 See [Addendum B](#addendum-b--restoring-general-access) for the fix.
 
@@ -209,11 +213,11 @@ $ sacctmgr show qos where name=preempt_qos,preempt_cpu_qos \
 **No association-level caps at all.** Every per-user override is empty:
 
 ```
-$ scontrol show assoc_mgr users=vineethb flags=assoc
-ClusterName=babel Account=msimchow UserName=vineethb(6010497) Partition= Priority=0 ID=1352
+$ scontrol show assoc_mgr users=<user> flags=assoc
+ClusterName=babel Account=<account> UserName=<user>(<uid>) Partition= Priority=0 ID=1352
     SharesRaw/Norm/Level/Factor=1/0.02/55/0.07
     UsageRaw/Norm/Efctv=9864948.16/0.00/0.00
-    ParentAccount= Lineage=/mld/msimchow/0-vineethb/ DefAssoc=Yes
+    ParentAccount= Lineage=/mld/<account>/0-<user>/ DefAssoc=Yes
     MaxJobs= MaxJobsAccrue= MaxSubmitJobs= MaxWallPJ=
     MaxTRESPJ=
     MaxTRESPN=
@@ -270,7 +274,7 @@ Treat `--test-only` as a syntax and permissions check, not a quota check.
 ```
 $ sshare -U -l
 Account    User      RawShares  NormShares  RawUsage  NormUsage  EffectvUsage  FairShare  LevelFS
-msimchow   vineethb          1    0.018182   9868339   0.000355      0.004235   0.068548  4.293474
+<account>   <user>          1    0.018182   9868339   0.000355      0.004235   0.068548  4.293474
 ```
 
 `PriorityDecayHalfLife = 7 days`, `PriorityUsageResetPeriod = NONE`,
@@ -314,7 +318,7 @@ An untyped `--gres=gpu:1` is a lottery. What we have actually drawn across our i
 since 2026-09-01:
 
 ```
-$ sacct -u vineethb -S 2026-09-01 -X -P -n -o JobName,AllocTRES | grep ^interactive_setup \
+$ sacct -u <user> -S 2026-09-01 -X -P -n -o JobName,AllocTRES | grep ^interactive_setup \
     | grep -oP "gres/gpu:[a-z0-9_]+" | sort | uniq -c | sort -rn
      15 gres/gpu:a6000
       8 gres/gpu:l40s
@@ -626,7 +630,7 @@ A representative pending job of ours scores **2876**:
 ```
 $ sprio -j 10479795 -l
 JOBID     PARTITION  USER      ACCOUNT   PRIORITY  AGE  ASSOC  FAIRSHARE  JOBSIZE  PARTITION  QOS  TRES
-10479795  preempt    vineethb  msimchow      2876    1      0        342      498       2000   33     2
+10479795  preempt    <user>  <account>      2876    1      0        342      498       2000   33     2
 ```
 
 Fairshare contributes 342 of a possible 5000; QOS contributes 33 of 1000.
@@ -733,11 +737,11 @@ sinfo -p preempt -N -o "%N %G %t %C %m"    # node-by-node GPU/state/CPU/mem
 ### What am I allowed to do?
 
 ```bash
-sacctmgr -s show user vineethb format=User,Account,QOS,DefaultQOS
+sacctmgr -s show user <user> format=User,Account,QOS,DefaultQOS
 sacctmgr show qos where name=preempt_qos,preempt_cpu_qos \
     format=Name,Priority,Preempt,GraceTime,MaxTRESPU,MaxJobsPU,MaxSubmitPU,MaxTRES,MinTRES,UsageFactor
 scontrol show partition preempt
-scontrol show assoc_mgr users=vineethb flags=assoc    # live limits + usage
+scontrol show assoc_mgr users=<user> flags=assoc    # live limits + usage
 sshare -U -l                                          # fairshare standing
 ```
 
@@ -799,7 +803,7 @@ Our association does carry `maxlab_qos` and `maxlab_cpu_qos`, and dry runs pass 
 validation:
 
 ```
-$ sbatch --test-only -p maxlab -q maxlab_qos -A msimchow --gres=gpu:1 -t 1:00:00 --wrap=hostname
+$ sbatch --test-only -p maxlab -q maxlab_qos -A <account> --gres=gpu:1 -t 1:00:00 --wrap=hostname
 sbatch: Job 10479876 to start at 2026-09-19T23:38:23 using 4 processors on babel-m9-16 in partition maxlab
 
 $ sbatch --test-only -p maxlab-cpu -q maxlab_cpu_qos -n 8 -t 1:00:00 --wrap=hostname
@@ -836,14 +840,14 @@ The single highest-leverage change available. `general` is 66 nodes / 522 GPUs a
 The blocker is one missing QOS on our association (§3). The fix is one command from an admin:
 
 ```
-sacctmgr modify user vineethb set qos+=normal
+sacctmgr modify user <user> set qos+=normal
 ```
 
 Supporting evidence to include in the request (`#babel-babble` Slack):
 
-- `sacctmgr -s show user vineethb` → QOS list has no `normal`
+- `sacctmgr -s show user <user>` → QOS list has no `normal`
 - `sbatch --test-only -p general -q normal ...` → `allocation failure: Invalid qos specification`
-- `sacctmgr show transaction where accounts=msimchow` → our association was created
+- `sacctmgr show transaction where accounts=<account>` → our association was created
   2026-08-28 with `qos=',63,41,71,2,'`, while `ndelara` (same account, 2026-09-03) got
   `qos=',63,41,1,71,2,42,'` including `1` (`normal`). `awu5` and `ataracha` have the same gap.
 

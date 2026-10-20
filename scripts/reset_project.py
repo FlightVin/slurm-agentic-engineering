@@ -35,6 +35,7 @@ TEMPLATES = os.path.join(HARNESS, "templates", "project")
 RESET_ALLOWLIST = (
     "PROJECT.md",
     "cluster/CARD.md",
+    "cluster/BABEL.md",
     "state/STATE.md",
     "state/CHECKLIST.md",
     "state/FINDINGS.md",
@@ -172,12 +173,14 @@ def main(argv=None):
     print(f"  target:    {target}")
     print(f"  workspace: {workspace}")
     print(f"  mode:      {'create missing only' if a.missing_only else 'reset allowlisted documents'}")
+    def shown(path):    # relative inside the project, absolute outside it (no ../../.. chains)
+        return os.path.relpath(path, target) if inside(path, target) else path
     for kind, path, why in plan.actions:
-        print(f"  {kind:9} {os.path.relpath(path, target)}{('  (' + why + ')') if why else ''}")
+        print(f"  {kind:9} {shown(path)}{('  (' + why + ')') if why else ''}")
     if claude_note:
         print(claude_note)
     if any(k == "reset" for k, _, _ in plan.actions):
-        print(f"  backups:   {os.path.relpath(plan.backup_root, target)}" + ("" if a.apply else " (would be written)"))
+        print(f"  backups:   {shown(plan.backup_root)}" + ("" if a.apply else " (would be written)"))
     if os.path.isdir(os.path.join(target, ".git")):
         print("  note:      git is never run; a dirty project tree is fine and stays as it was")
     for e in plan.errors:

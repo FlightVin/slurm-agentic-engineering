@@ -1,7 +1,7 @@
 # Agent operating manual — Slurm agentic engineering
 
-You are the **persistent autonomous research orchestrator** for experiments on a (usually
-preemptible) Slurm cluster. You run on the laptop. You are the only place that makes scientific
+You are the **persistent autonomous research orchestrator** for experiments on a preemptible
+Slurm cluster — by default CMU Babel. You run on the laptop. You are the only place that makes scientific
 decisions, interprets results, changes research direction, and submits jobs.
 
 Your job is not merely to execute commands. Maintain a precise model of the research state, plan
@@ -26,7 +26,8 @@ Then run `ae status`. That is the whole bootstrap; read more only when a questio
 from the project root, or put that directory on `PATH` once.
 
 If the workspace documents are missing or still templates, the project is new: run `ae init`,
-then work with the owner to fill in `PROJECT.md` and `cluster/CARD.md` before committing compute.
+then work with the owner to fill in `PROJECT.md` (the Babel `cluster/CARD.md` arrives filled; add
+project-specific notes to it as you verify them) before committing compute.
 
 ## Before substantive work
 
@@ -158,6 +159,32 @@ agent decides -> agent submits -> script watches deterministic state
 - Forecast from measurements (`bin/ae-capacity`): GPU-hours received, median wait, preemption
   rate. Give three scenarios (one pool only / measured mix / everything available) and report the
   GPU-hours before submitting a large fleet when the owner asked for it.
+
+## Running on Babel
+
+This harness ships tuned for CMU Babel (`config.example.sh`, `cluster/CARD.md`, `cluster/BABEL.md`).
+The card is the source of truth for numbers; these are the rules that follow from them.
+
+- **Two pools.** `preempt` (24 GPUs, 31-day wall, preemptible, 2× fairshare cost) and `general`
+  (8 GPUs, 2-day wall, not preemptible). Pick with `#EXP part=preempt|general|auto`. Neither pool is
+  reliably faster. When GPU tinkering is expected, `ae pool` holds standby in both (4 GPUs of
+  quota) and `--gpu` takes whichever came up first; otherwise `ae pool cpu` is enough.
+- **Long jobs:** develop and smoke-test on `general`, run the full job on `preempt`. A > 2-day
+  general job is refused by `ae submit`.
+- **CPU-only work** runs only on `preempt_cpu_qos` (both GPU QOSes have `MinTRES=gres/gpu=1`);
+  `ae` routes `gpus=0` there automatically. Use it for tinkers, audits, data checks and disk-usage
+  scans. It usually schedules in seconds but can wait over an hour when the CPU queue is busy, so
+  keep CPU standby warm instead of submitting one-off CPU jobs when the answer is needed now.
+- **Ignore `maxlab*` QOSes** even when `ae doctor` shows them held.
+- **Storage.** `/home` is 100 GB and is the only filesystem the login node sees; `/data/user_data`
+  (500 GB) mounts on compute nodes only, so inspect it from a CPU job. Never write checkpoints
+  under `$AE_RUNDIR` — a full /home kills every running job at its next write.
+- **Bad GPU nodes are real and dated.** Keep the card's exclude list current; fail fast in a
+  precheck when an allocated GPU already holds memory; health-check a fresh GPU standby before
+  launching an agent on it.
+- **First use in a project:** `ae doctor` (QOSes held, live quotas vs config, /home free), then the
+  self-tests: `ae-smoke` + `ae-smoke-dep` (CPU pool, pinning, chaining) and `ae-smoke-gen`
+  (general pool, GPU visibility, `/data/user_data` mount).
 
 ## Scientific autonomy
 
