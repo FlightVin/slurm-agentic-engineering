@@ -58,6 +58,8 @@ echo "slurm-agentic-engineering/" >> .git/info/exclude    # keep harness + works
 export PATH="$PWD/slurm-agentic-engineering/bin:$PATH"
 
 ae init                 # config.sh (Babel), PROJECT.md, cluster/CARD.md + BABEL.md, state/*, ./CLAUDE.md
+                        #   (add --no-claude-md to leave the project root untouched; then start Claude with
+                        #    `cd slurm-agentic-engineering && claude`, which auto-loads its own CLAUDE.md -> agent.md)
 $EDITOR slurm-agentic-engineering/config.sh     # set AE_REMOTE_REPO and AE_BRANCH; the rest is Babel
 ae paths                # check what resolved where (offline)
 ```
