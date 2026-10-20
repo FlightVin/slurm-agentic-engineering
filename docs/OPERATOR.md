@@ -95,13 +95,12 @@ they need no babysitting. Judgement calls go to `state/DECISIONS.md`.
 `no change` when nothing is new, so idle wakes are cheap.
 
 ## 10. How does standby work?
-Three tiers on Babel: **CPU** (`preempt_cpu_qos`, ~5 s to schedule on a quiet queue, up to an hour+
-when busy, 0 GPUs, separate quota —
-effectively free), **preempt GPU** (2.5–3.5 h typical, 1 of 24 GPUs) and **general GPU** (varies
-from seconds to days, 1 of 8 GPUs, never preempted). `ae pool cpu` keeps 2 CPU standby and is the
-routine call; plain `ae pool` also holds 2 GPU standby in each pool, so whichever pool wins the race
-serves `--gpu` — use it when GPU tinkering is expected, since it holds 4 GPUs of quota. Tinkering
-defaults to CPU. Each holds a long-lived tmux server that agents attach to as
+Three tiers on Babel: **CPU** (`preempt_cpu_qos`, 0 GPUs, separate quota), **preempt GPU** (1 of
+the preempt GPU quota each) and **general GPU** (1 of the general GPU quota each, not preemptible).
+Start times are not fixed; the agent measures them on first run (`cluster/CARD.md`).
+`ae pool cpu` holds CPU standby only; plain `ae pool` also holds GPU standby in both pools (4 GPUs
+of quota with the default sizes), and `--gpu` takes whichever is running. Which tiers to hold is
+the owner's preference or the agent's measured choice. Tinkering defaults to CPU. Each holds a long-lived tmux server that agents attach to as
 windows. `--requeue` means a preempted standby returns under the same JobID by
 itself; `ae pool` only tops up after a terminal end (12 h CPU / 24 h preempt GPU / 2 days general),
 and `ae launch` tops up automatically if no standby is running.

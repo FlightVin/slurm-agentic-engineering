@@ -3,7 +3,7 @@
 # HYPOTHESIS: none -- harness self-test for Babel's second pool. Verifies that part=general
 # lands on the general partition under the `normal` QOS (not preemptible), that the allocated
 # GPU is visible and not already occupied by a foreign process, and that the compute-only
-# /data/user_data mount is present. Costs one GPU for seconds; it may queue for a while.
+# /data/user_data mount is present. Costs one GPU for seconds.
 
 phase pool "test -s $AE_RESULTS/pool.json" '
     head=$(git rev-parse HEAD)

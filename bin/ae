@@ -374,8 +374,7 @@ QOSMaxGRESPerUser until one frees. That is expected for a fleet larger than the 
             partition="$AE_PARTITION_GEN"; qos="$AE_QOS_GEN"; gres="--gres=gpu:${gtype:+$gtype:}$gpus"
             if [ "${AE_GEN_MAX_SECONDS:-0}" -gt 0 ] && [ "${secs:-0}" -gt "$AE_GEN_MAX_SECONDS" ]; then
                 die "time=$tlim exceeds $AE_PARTITION_GEN's max wall (${AE_GEN_MAX_SECONDS}s).
-    Prototype on $AE_PARTITION_GEN with a shorter time, then run the full job on
-    part=$AE_PARTITION (long wall, requeue-safe)."
+    Use part=$AE_PARTITION (longer wall, requeue-safe) or a shorter time."
             fi
         else
             partition="$AE_PARTITION"; qos="$AE_QOS_GPU"; gres="--gres=gpu:${gtype:+$gtype:}$gpus"

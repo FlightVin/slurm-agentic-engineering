@@ -7,6 +7,9 @@
 > Shipped with slurm-agentic-engineering as the Babel reference. It was measured from one research
 > project, so script and job names below (`naivepoker_*`, `~/scripts/...`) are that project's; the
 > cluster facts are general. Addenda A/B and `cluster/CARD.md` supersede §3 on the `general` pool.
+> Queue wait times, start latencies and pool recommendations in this reference are historical
+> observations (2026-09), not guidance. Measure current conditions (agent.md "First run", step 9)
+> and choose pools per `cluster/CARD.md` "Choosing a pool".
 
 **Scope note.** This document covers only the two submission paths that actually work:
 `~/scripts/interactive_job.sh` and the single-GPU training submit script

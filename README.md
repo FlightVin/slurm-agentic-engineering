@@ -23,11 +23,14 @@ git clone git@github.com:FlightVin/slurm-agentic-engineering.git && cd slurm-age
 That is all. On the first start the agent sees that `config.sh` is missing and runs the
 **First run** procedure in [`agent.md`](agent.md): it excludes the harness from your project's
 history, runs `ae init`, asks you a few questions in one message (study branch, what to do with
-uncommitted files, Babel clone path, what the project is for), writes `config.sh`, clones the
-project on Babel, runs `ae setup` and the self-tests, writes `PROJECT.md` with you, and reports.
-It stops and asks if ssh to Babel is not set up yet (see "Before you start"). Claude asks you to
-approve each new command; choose "Yes, and don't ask again" for `bin/ae` once and the rest of the
-setup runs without prompts. To let the agent edit project code without a prompt per file, type
+uncommitted files, Babel clone path, what the project is for, pool preference), writes
+`config.sh`, clones the project on Babel, runs `ae setup` and the self-tests, verifies the GPU,
+CPU and time limits of `preempt` and `general`, measures the queues, writes `PROJECT.md` with
+you, and reports.
+It stops and asks if ssh to Babel is not set up yet (see "Before you start"). The harness's
+`.claude/settings.json` pre-approves the `ae`, `ae-watch` and `ae-capacity` commands, read-only
+`git status/log/diff`, and the test suites, so setup runs without a prompt per command. Anything
+else (project files, `ssh`, `git push`) still asks. To let the agent edit project code without a prompt per file, type
 `/add-dir ..` once in Claude, or start Claude in the project root and say "Read and follow
 `slurm-agentic-engineering/agent.md`". The manual steps
 below are the same procedure, for reference.
@@ -115,8 +118,12 @@ ae wait ae-smoke-dep 3600 && ae harvest
 `ae submit` refuses uncommitted changes in the project: commit and stay on `AE_BRANCH` first.
 `ae doctor` must show `held:` for all three QOSes and the free space on `/home`. After the
 harvest, `results/ae-smoke-dep/chain.json` must contain `"ran_after_parent": true` and
-`results/ae-smoke-gen/pool.json` must show `"partition": "general"`. The CPU queue can take
-from seconds to over an hour.
+`results/ae-smoke-gen/pool.json` must show `"partition": "general"`.
+
+**4b. Verify limits and measure the queues** (the first run does this): check the GPU, CPU,
+running/submitted and wall-time limits of both pools with `sacctmgr show qos` and
+`scontrol show partition`, measure queue state and start times, and record them in
+`cluster/CARD.md` ("Verified on this account"). The docs make no claim about wait times.
 
 **5. Describe the project** in `slurm-agentic-engineering/PROJECT.md`: objective, success
 criteria, constraints, how a run executes (environment, entry point), and `PROJ_DATA` (for example
@@ -161,7 +168,9 @@ results before harvest (`results/`) and per-run scratch (`run/`). Datasets and c
 2. `ae submit <id>` refuses a dirty tree, pushes `AE_BRANCH`, creates a detached worktree at that
    commit on Babel, generates the Slurm script (requeue, 2-minute preemption signal), and writes
    the ledger line. Routing: `gpus=0` → `preempt_cpu_qos`; `part=general` → `normal`;
-   `part=auto` → whichever pool estimates the earlier start.
+   `part=auto` → whichever pool estimates the earlier start. Which pool to use is your
+   preference or the agent's measured choice; `cluster/CARD.md` ("Choosing a pool") lists the
+   current suggestions.
 3. Preemption: Slurm requeues the same job ID; finished phases are skipped.
 4. `ae status` asks Slurm. `ae-watch` (a plain script) wakes the agent only when a job fails or
    completes.
@@ -196,8 +205,8 @@ ae tinker <id> [--gpu] < brief.md | investigate <id> | launch <id> | report <id>
 ae-watch [--once] [--suppress-done RE] [--when-complete RE:N:LABEL]
 ae-capacity [hours] | ae-topup <queue-file> [interval]
 ```
-`ae help` prints the full list. `ae pool cpu` is the routine standby call; plain `ae pool` also
-holds 2 GPU standby in each GPU pool (4 GPUs of quota).
+`ae help` prints the full list. `ae pool cpu` holds CPU standby only; plain `ae pool` also holds
+2 GPU standby in each GPU pool (4 GPUs of quota with the default sizes).
 
 ## Reset for a new project
 Restore the workspace documents (`PROJECT.md`, `cluster/{CARD,BABEL}.md`,

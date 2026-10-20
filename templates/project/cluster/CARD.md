@@ -1,40 +1,62 @@
 # Babel cluster card
 Everything you need in normal operation. Full reference: `cluster/BABEL.md` (850+ lines —
-grep it, never load it). Facts verified 2026-09/10; re-check quotas with `ae doctor`, which
-prints Slurm's live QOS values next to `config.sh`.
+grep it, never load it). The limits below are the values configured in `config.sh` (recorded
+2026-09/10). **They are claims until verified:** the first run verifies them and records the
+result in "Verified on this account" below. This card makes no statement about queue wait
+times; measure them (agent.md "First run").
 
 ## Two pools — choose per experiment with `#EXP part=preempt|general|auto`
-| | `preempt` (default) | `general` |
+| | `preempt` (`AE_PARTITION`) | `general` (`AE_PARTITION_GEN`) |
 |---|---|---|
 | GPU QOS | `preempt_qos` | `normal` |
-| CPU-only QOS | `preempt_cpu_qos` (0 GPUs, 32 CPU/job, 64 total, 20 running / 50 submitted, separate quota) | — impossible |
-| GPUs per user | **24** | **8** |
+| CPU-only QOS | `preempt_cpu_qos` (0 GPUs, 32 CPU/job, 64 total, 20 running / 50 submitted, separate quota) | none |
+| GPUs per user | 24 | 8 |
 | CPUs per job | 256 | 128 |
 | Running / submitted | 24 / 100 | 10 / 50 |
-| Max walltime | **31 days** | **2 days** |
-| Priority / tier | 1 000 / **1** (lowest) | 10 000 / **4** |
-| **Preemptible** | yes, by everyone | **NO** (verified: no QOS lists `normal` as preemptable) |
-| GPU billing weight | 16.0 (fairshare costs 2×) | **8.0** |
-| Default walltime | **30 minutes** — never omit `-t` (`ae` defaults to `AE_DEFAULT_TIME`) | |
+| Max walltime | 31 days | 2 days |
+| Preemptible | yes | no (no QOS lists `normal` as preemptable, 2026-09-21) |
+| GPU billing weight | 16.0 | 8.0 |
+| Default walltime | 30 minutes — never omit `-t` (`ae` uses `AE_DEFAULT_TIME`) | 6 hours (`scontrol show partition general`, 2026-10-20) |
 
-`maxlab_qos` / `maxlab_cpu_qos` may show up as held and pass a dry run, but they are **not usable
-in practice** (`BABEL.md` Addendum A). Ignore them.
+`maxlab_qos` / `maxlab_cpu_qos` may show up as held and pass a dry run, but they are not usable
+in practice (`BABEL.md` Addendum A). Ignore them.
 
-### Operating strategy
-- **Hold standby on both GPU pools and use whichever comes up first** (`ae pool` = cpu + preempt
-  + general). Neither pool is reliably faster; measured 2026-09-21 for the same 1-GPU/1-h job,
-  general was 11 days sooner — the week before it was the other way round.
-- `ae attach --gpu` / `ae tinker <id> --gpu` take the oldest RUNNING GPU standby in either pool;
-  `--preempt` / `--gen` force one.
-- `part=auto` asks both pools with `sbatch --test-only` and takes the earlier estimate; it forces
-  preempt when `time > 2 days`. Estimates are worst-case and can be very wrong (predicted a day,
-  started in 60 s): a tie-breaker, not an oracle. Warm standby is the reliable way to start *now*.
+## Choosing a pool
+The harness does not prescribe a pool. For each experiment, choose by one of these:
+1. **The owner's stated preference** (record it in `PROJECT.md` as an amendment), or
+2. **The fastest result**, from the measurements in "Verified on this account" and current
+   queue state (`part=auto`, `bin/ae-capacity`, `squeue` pending counts).
+
+State the choice and its reason in `state/DECISIONS.md`.
+
+Suggestions (current owner preferences — not rules; the owner or the measurements override them):
+- Prototype and smoke-test on `general` (not preemptible); run jobs longer than 2 days on `preempt`.
+- Keep CPU standby (`ae pool cpu`) for tinkers; hold GPU standby only when GPU work is expected.
+
+Mechanics (facts, not advice):
+- `part=auto` asks both pools with `sbatch --test-only` and takes the earlier estimate. It uses
+  `preempt` when `time` > 2 days. `--test-only` estimates are not guarantees.
 - Slurm cannot race one job across both pools (QOSes are partition-specific and `--test-only`
-  does not validate the pairing), which is why `ae` asks each pool separately.
-- **Long jobs:** develop and smoke-test on general (uninterrupted, half the fairshare), then run
-  the full job on preempt with `--requeue`. `ae submit` refuses a > 2-day general job.
+  does not validate the pairing), so `ae` asks each pool separately.
+- `ae attach gpu` / `ae tinker <id> --gpu` take the oldest RUNNING GPU standby in either pool;
+  `--preempt` / `--gen` force one.
+- `ae submit` refuses a `general` job longer than 2 days.
 - Preempt-safety (`--requeue`, `--signal=B:USR1@120`, the USR1 discriminator, phase skipping)
-  is unconditional, on both pools. On general it covers node failure and walltime chaining.
+  applies on both pools. On `general` it covers node failure and walltime chaining.
+
+## Verified on this account
+<!-- Filled by the first run (agent.md "First run", step 8); re-measure when conditions change.
+     Record the date and the command for each value. -->
+| item | `preempt` | `general` | `preempt_cpu_qos` | how / date |
+|---|---|---|---|---|
+| GPU limit per user (MaxTRESPU) | | | — | `sacctmgr show qos` |
+| CPU limit per job / per user | | | | `sacctmgr show qos`, `scontrol show partition` |
+| Running / submitted limit | | | | `sacctmgr show qos` |
+| Max / default walltime | | | — | `scontrol show partition` |
+| Pending jobs ahead (all users) | | | | `squeue -p <part> -t PD` |
+| `--test-only` start estimate, 1 GPU / 1 h | | | — | `sbatch --test-only` |
+| Self-test time to RUNNING | | | | ledger submit time vs `sacct` Start |
+| Recent median / p90 wait (own jobs) | | | — | `bin/ae-capacity` |
 
 ## Traps that have bitten (handled by `ae`)
 - **`MinTRES=gres/gpu=1`** on `preempt_qos` *and* `normal`: a 0-GPU job pends on `QOSMinGRES`
@@ -51,22 +73,12 @@ in practice** (`BABEL.md` Addendum A). Ignore them.
 ## Preemption
 `PreemptType=preempt/qos`, `PreemptMode=REQUEUE`,
 `PreemptParameters=youngest_first,send_user_signal`, GraceTime **2 min**.
-- **`youngest_first`**: the most recently *started* job dies first — old allocations are safer.
+- **`youngest_first`**: the most recently *started* job is preempted first.
 - **`send_user_signal`**: USR1 arrives on preemption, not only near walltime; the preamble tells
   them apart by the time left.
-- Requeue keeps the **same JobID**, `SLURM_RESTART_COUNT` +1, usually back on a node in 2–5 min.
-  No practical requeue cap (jobs reach 95 restarts). A requeued job is non-terminal, so
-  `afterany` dependents correctly sleep through every preemption of their parent.
-
-## Standby latency (measured)
-| tier | time to RUNNING | cost |
-|---|---|---|
-| `preempt_cpu_qos` (CPU) | **~5 s** when the CPU queue is quiet (2026-09); **41 s – 70+ min** on 2026-10-20 with 100+ CPU jobs pending | 0 GPUs, separate quota |
-| `preempt_qos` (GPU) | **2.5–3.5 h** typical | 1 of 24 GPUs |
-| `normal` (general GPU) | seconds to days — varies hour to hour (1 GPU started at once on 2026-10-20) | 1 of 8 GPUs |
-
-CPU latency depends on how busy `preempt_cpu_qos` is: check `squeue -q preempt_cpu_qos -t PD | wc -l`.
-Keep CPU standby **warm** rather than requesting it when needed — that is what hides the wait.
+- Requeue keeps the **same JobID** and increments `SLURM_RESTART_COUNT`. No practical requeue cap
+  (jobs reached 95 restarts). A requeued job is non-terminal, so `afterany` dependents correctly
+  sleep through every preemption of their parent.
 
 ## Storage (verified)
 | path | quota | shared between nodes | on the LOGIN node |

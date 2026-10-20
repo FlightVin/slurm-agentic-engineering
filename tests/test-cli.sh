@@ -67,6 +67,9 @@ expect "denies pushing to the authoritative branch" 'grep -q "\"Bash(git push or
 expect "denies sbatch / rm -rf / force-push" 'grep -q "Bash(sbatch:\*)" <<<"$r" && grep -q "Bash(rm -rf:\*)" <<<"$r" && grep -q "Bash(git push --force:\*)" <<<"$r"'
 expect "no placeholder left after rendering" '! grep -q "{{" <<<"$r"'
 
+echo "== harness Claude settings"
+expect ".claude/settings.json is valid JSON and pre-approves the ae commands" 'python3 -c "import json,sys; a=json.load(open(sys.argv[1]))[\"permissions\"][\"allow\"]; assert \"Bash(bin/ae *)\" in a and \"Bash(bin/ae-watch *)\" in a" "$H/.claude/settings.json"'
+
 echo "== preamble logic"
 bash "$H/tests/test-preamble.sh" >/dev/null && ok "test-preamble.sh" || bad "test-preamble.sh"
 

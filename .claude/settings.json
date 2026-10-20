@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bin/ae *)",
+      "Bash(./bin/ae *)",
+      "Bash(bin/ae-watch *)",
+      "Bash(./bin/ae-watch *)",
+      "Bash(bin/ae-capacity *)",
+      "Bash(./bin/ae-capacity *)",
+      "Bash(./slurm-agentic-engineering/bin/ae *)",
+      "Bash(./slurm-agentic-engineering/bin/ae-watch *)",
+      "Bash(./slurm-agentic-engineering/bin/ae-capacity *)",
+      "Bash(git status *)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(bash tests/test-preamble.sh)",
+      "Bash(bash tests/test-cli.sh)",
+      "Bash(bash tests/test-e2e-local.sh)",
+      "Bash(python3 tests/test_reset_project.py)"
+    ]
+  }
+}

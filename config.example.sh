@@ -24,7 +24,7 @@ AE_REMOTE_ROOT='$HOME/ae'            # single-quoted: expanded REMOTELY, not loc
                                      # Under /home (100 GB quota): never write checkpoints here.
 
 # --- pool 1: preempt (default) --------------------------------------------
-#   24 GPUs/user, 31-day wall, priority tier 1, PREEMPTIBLE by everyone, 2x fairshare cost.
+#   Recorded limits (verify on first run): 24 GPUs/user, 31-day wall, preemptible.
 AE_PARTITION="preempt"
 AE_QOS_GPU="preempt_qos"             # MinTRES=gres/gpu=1 -> a 0-GPU job pends forever here
 AE_QOS_CPU="preempt_cpu_qos"         # 0 GPUs, SEPARATE quota: 32 cpu/job, 64 cpu total;
@@ -35,7 +35,7 @@ AE_SIGNAL="B:USR1@120"               # Babel GraceTime is 2 min; preamble.sh tel
                                      # preemption from walltime by the time left
 
 # --- pool 2: general (NOT preemptible) ------------------------------------
-#   8 GPUs/user, 2-day wall, tier 4, not preemptible (verified 2026-09-21), half fairshare cost.
+#   Recorded limits (verify on first run): 8 GPUs/user, 2-day wall, not preemptible.
 #   `normal` ALSO carries MinTRES=gres/gpu=1: CPU-only work can never run here.
 #   #EXP part=general -> here;  part=auto -> whichever pool estimates the earlier start.
 AE_PARTITION_GEN="general"
@@ -46,20 +46,19 @@ AE_GEN_MAX_SUBMIT=50                 # MaxSubmitPU
 AE_GEN_MAX_SECONDS=172800            # partition MaxTime 2-00:00:00; ae refuses longer jobs
 
 # --- standby (debug/tinkering) capacity -----------------------------------
-# CPU standby: ~5 s to RUNNING on a quiet queue, over an hour when 100+ CPU jobs pend; separate
-# quota, 0 GPUs. The default tinkering substrate -- keep it warm so the wait is already paid.
+# CPU standby on preempt_cpu_qos: 0 GPUs, separate quota. Hosts tinkers that need no GPU.
 AE_DBG_CPU_NAME="ae-dbg-cpu"
 AE_DBG_CPU_CPUS=4
 AE_DBG_CPU_TIME="12:00:00"
 AE_DBG_CPU_POOL=2
-# GPU standby on preempt: measured 2.5-3.5 h to RUNNING; 1 of the 24-GPU quota each.
+# GPU standby on preempt: 1 of the preempt GPU quota each.
 AE_DBG_NAME="ae-dbg"
 AE_DBG_GPUS=1                        # MinTRES forces >= 1
 AE_DBG_CPUS=4
 AE_DBG_TIME="24:00:00"
 AE_DBG_POOL=2
-# GPU standby on general: cannot be preempted once running; 1 of the 8-GPU quota each.
-# Which GPU pool starts first varies hour to hour, so `ae pool` holds both.
+# GPU standby on general: not preemptible; 1 of the general GPU quota each.
+# Set any *_POOL to 0 to hold no standby in that tier (pool choice: cluster/CARD.md).
 AE_DBG_GEN_NAME="ae-dbg-gen"
 AE_DBG_GEN_GPUS=1
 AE_DBG_GEN_CPUS=4

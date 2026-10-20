@@ -47,6 +47,8 @@ Ask the owner all questions in ONE message (step 3), with a recommended default 
      personal notes to `.git/info/exclude`". `ae submit` refuses a dirty tree.
    - Babel clone path (`AE_REMOTE_REPO`): default `'$HOME/projects/<repo-name>'`.
    - What the project is for, in a few sentences (input for `PROJECT.md`).
+   - Pool preference: `preempt`, `general`, or "choose the fastest by measurement" (default:
+     choose by measurement; show the suggestions in `cluster/CARD.md` "Choosing a pool").
 4. **Apply the answers.** Set `AE_REMOTE_REPO` and `AE_BRANCH` in `config.sh` (keep the single
    quotes). Clean the tree as agreed. Create and push the branch if one was chosen.
 5. **Check ssh.** Run `ssh -o BatchMode=yes babel true`. If it fails, show the owner the
@@ -62,16 +64,29 @@ Ask the owner all questions in ONE message (step 3), with a recommended default 
    'ae-smoke:3:selftest'` as a background task, then `ae harvest`. Pass criteria:
    `results/ae-smoke-dep/chain.json` has `"ran_after_parent": true`; `results/ae-smoke/pin.json`
    has `"pinned": true` and `qos` `preempt_cpu_qos`; `results/ae-smoke-gen/pool.json` has
-   `"partition": "general"` and `"user_data_mounted": "yes"`. The CPU queue can take an hour;
-   continue with step 9 while you wait.
-9. **Write `PROJECT.md` with the owner.** Read the project's README and entry points first, then
+   `"partition": "general"` and `"user_data_mounted": "yes"`. Do steps 9 and 10 while the
+   self-tests queue.
+9. **Verify the limits and explore the queues.** Do not trust the numbers in `config.sh` or
+   `cluster/CARD.md`; measure them. Fill the card's "Verified on this account" table with the
+   value, the command and the date for each item:
+   - GPU, CPU, running and submitted limits per pool:
+     `sacctmgr -n -P show qos preempt_qos,preempt_cpu_qos,normal format=Name,MaxTRESPU,MaxTRESPerJob,MaxJobsPU,MaxSubmitPU,MinTRES,MaxWall`.
+   - Wall-time limits: `scontrol show partition preempt` and `general` (`MaxTime`, `DefaultTime`).
+   - Queue state: pending and running job counts per partition and for `preempt_cpu_qos`.
+   - Start estimates: `sbatch --test-only` for 1 GPU / 1 h on each pool (an estimate only).
+   - Measured start: each self-test's submit time (ledger) against its `sacct` `Start`.
+   - Your recent history: `bin/ae-capacity` (median and p90 wait, preemptions).
+   If a measured limit differs from `config.sh`, correct `config.sh`, record the change in
+   `state/IMPLEMENTATION-LOG.md`, and tell the owner. Report the measurements to the owner with
+   the pool choice they imply; record the owner's preference (if any) in `PROJECT.md`.
+10. **Write `PROJECT.md` with the owner.** Read the project's README and entry points first, then
    draft: objective, success criteria, constraints, how a run executes on Babel (environment
    under `/data/user_data/$USER`, never `/home`; the real train/eval commands), `PROJ_DATA`, and
    what each experiment must emit. Show the draft; apply corrections.
-10. **Initialise `state/STATE.md` and `state/CHECKLIST.md`** from `PROJECT.md`, and add a dated
+11. **Initialise `state/STATE.md` and `state/CHECKLIST.md`** from `PROJECT.md`, and add a dated
     "first-run setup" entry to `state/IMPLEMENTATION-LOG.md` (branch, paths, self-test result).
-11. **Report** in one short message: what is set up, the self-test result, and the proposed first
-    research step. Then continue with the normal loop.
+12. **Report** in one short message: what is set up, the self-test result, the verified limits,
+    the queue measurements, and the proposed first research step. Then continue with the normal loop.
 
 ## Before substantive work
 
@@ -255,8 +270,8 @@ agent decides -> agent submits -> script watches deterministic state
 
 ## Capacity, standby and forecasts
 
-- Keep CPU standby warm for tinkers and audits (`ae pool cpu`); track its expiry and renew before
-  it lapses. `ae pool <N>` is CPU-only shorthand; GPU standby only when a tinker truly needs one.
+- Hold the standby the work needs (see "Running on Babel"); track its expiry and renew before it
+  lapses. `ae pool <N>` is CPU-only shorthand.
 - No GPU idles while a runnable study job waits: move pending work to an idle pool with
   `scontrol update` when the site allows it. Never cancel running work for priority.
 - Forecast from measurements (`bin/ae-capacity`): GPU-hours received, median wait, preemption
@@ -268,16 +283,20 @@ agent decides -> agent submits -> script watches deterministic state
 This harness ships tuned for CMU Babel (`config.example.sh`, `cluster/CARD.md`, `cluster/BABEL.md`).
 The card is the source of truth for numbers; these are the rules that follow from them.
 
-- **Two pools.** `preempt` (24 GPUs, 31-day wall, preemptible, 2× fairshare cost) and `general`
-  (8 GPUs, 2-day wall, not preemptible). Pick with `#EXP part=preempt|general|auto`. Neither pool is
-  reliably faster. When GPU tinkering is expected, `ae pool` holds standby in both (4 GPUs of
-  quota) and `--gpu` takes whichever came up first; otherwise `ae pool cpu` is enough.
-- **Long jobs:** develop and smoke-test on `general`, run the full job on `preempt`. A > 2-day
-  general job is refused by `ae submit`.
+- **Two pools.** `preempt` (preemptible, longer wall) and `general` (not preemptible, 2-day wall).
+  Use the limits you verified in `cluster/CARD.md`, not remembered numbers. Pick a pool per
+  experiment with `#EXP part=preempt|general|auto`.
+- **Choosing a pool.** No pool is prescribed. Choose by (a) the owner's stated preference, or
+  (b) the fastest result by current measurement (verified limits, queue state, `part=auto`,
+  `bin/ae-capacity`). If the owner has not stated a preference and the choice matters (cost,
+  preemption risk, a large fleet), ask. Record each choice and its reason in `state/DECISIONS.md`.
+  The card's "Suggestions" are the owner's current preferences, not rules. Re-measure before a
+  large submission: queue conditions change.
+- **Standby.** Hold the tiers the work needs: `ae pool cpu` for CPU tinkers; GPU standby only
+  when GPU work is expected (`ae pool gpu`, `ae pool gen`, or `ae pool` for all three).
 - **CPU-only work** runs only on `preempt_cpu_qos` (both GPU QOSes have `MinTRES=gres/gpu=1`);
   `ae` routes `gpus=0` there automatically. Use it for tinkers, audits, data checks and disk-usage
-  scans. It usually schedules in seconds but can wait over an hour when the CPU queue is busy, so
-  keep CPU standby warm instead of submitting one-off CPU jobs when the answer is needed now.
+  scans. Measure its queue like the others.
 - **Ignore `maxlab*` QOSes** even when `ae doctor` shows them held.
 - **Storage.** `/home` is 100 GB and is the only filesystem the login node sees; `/data/user_data`
   (500 GB) mounts on compute nodes only, so inspect it from a CPU job. Never write checkpoints
@@ -285,9 +304,9 @@ The card is the source of truth for numbers; these are the rules that follow fro
 - **Bad GPU nodes are real and dated.** Keep the card's exclude list current; fail fast in a
   precheck when an allocated GPU already holds memory; health-check a fresh GPU standby before
   launching an agent on it.
-- **First use in a project:** `ae doctor` (QOSes held, live quotas vs config, /home free), then the
-  self-tests: `ae-smoke` + `ae-smoke-dep` (CPU pool, pinning, chaining) and `ae-smoke-gen`
-  (general pool, GPU visibility, `/data/user_data` mount).
+- **First use in a project:** see "First run": `ae doctor`, limit verification, queue
+  measurements, and the self-tests `ae-smoke` + `ae-smoke-dep` (CPU pool, pinning, chaining) and
+  `ae-smoke-gen` (general pool, GPU visibility, `/data/user_data` mount).
 
 ## Scientific autonomy
 
