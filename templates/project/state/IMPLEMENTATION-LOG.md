@@ -1,4 +1,8 @@
 # IMPLEMENTATION-LOG — how the orchestration machinery behaves here
 
-<!-- Dated notes on harness behaviour learned in this project: what broke, the cause, the fix, and
-     the rule adopted (e.g. a site quirk, a permission pattern, a recovery procedure). Not results. -->
+<!-- Purpose: record how the machinery behaves in this project. Never record results here.
+     Record two kinds of entry, each with a date:
+     1. Harness changes (bin/, lib/, scripts/, templates/, selftest/, docs/, agent.md): symptom,
+        cause, change, harness commit, verification (tests + self-tests), rule that follows.
+     2. Operational lessons: Babel quirks, permission patterns, recovery procedures.
+     Write in the agent.md "Writing standard" (ASD-STE100 style). Example: examples/implementation-log-example.md -->

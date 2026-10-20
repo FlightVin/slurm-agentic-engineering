@@ -62,6 +62,44 @@ Record every owner amendment verbatim (or faithfully) at the end of `PROJECT.md`
 add a matching item to CHECKLIST section 0 — marked NON-NEGOTIABLE when the owner says so. When a
 new amendment supersedes an older one, say so in both places. Verify every edit by reading it back.
 
+## Where everything lives
+
+All paths below are relative to the workspace (`slurm-agentic-engineering/` unless `AE_HOME` is
+set). `ae paths` prints the resolved locations. The workspace is git-ignored by the harness repo
+and by the project repo, so it exists only on the laptop.
+
+| path | contents | who writes it |
+|---|---|---|
+| `PROJECT.md` | objective, success criteria, protocol, owner amendments | owner + you |
+| `config.sh` | site config (Babel values; `AE_REMOTE_REPO`, `AE_BRANCH`) | owner |
+| `cluster/CARD.md`, `cluster/BABEL.md` | cluster facts (read the card; grep the reference) | you add dated facts to the card |
+| `state/STATE.md` | compact scientific state (≤ ~60 lines) | you |
+| `state/CHECKLIST.md` | the live execution plan | you |
+| `state/FINDINGS.md` | append-only results; `ae harvest` adds one line per experiment | `ae` + you |
+| `state/DECISIONS.md` | dated decisions with their reason | you |
+| `state/IMPLEMENTATION-LOG.md` | how the machinery behaves: harness changes, cluster quirks, permission patterns, recovery procedures. Never results. | you |
+| `state/LEDGER.jsonl` | one JSON line per submission: `expid`, `jobid`, commit `sha`, recipe hash `expsha`, `deps`, `submitted` | `ae submit` only |
+| `exp/<expid>.sh` | experiment definitions | you |
+| `inv/<id>/` | tinker briefs and reports | you + `ae` |
+| `results/<expid>/` | harvested distillates, `job.sh`, `tail.log` | `ae harvest` |
+| `log/YYYY-MM.md` | reasoning, decisions in context, research narrative | you |
+
+On Babel, under `AE_REMOTE_ROOT` (`~/ae`): `code/` (pinned worktrees), `jobs/` (generated job
+scripts), `out/` (Slurm logs — read them with `ae logs`), `results/` (distillates before harvest),
+`run/` (per-run scratch), `inv/` (tinker work). Datasets and checkpoints go to `PROJ_DATA` under
+`/data/user_data/$USER`.
+
+## Templates and examples
+
+- `templates/` holds the starting points. Use them every time: `templates/exp.sh` for a new
+  experiment, `templates/inv.md` for a tinker brief. `templates/project/` holds the pristine
+  workspace documents; `ae init` copies them and `scripts/reset_project.py` restores them.
+- `examples/` holds the complete record of a finished Babel study. It is read-only reference.
+  Read the relevant example before you write a document of that type for the first time:
+  `state-example.md`, `checklist-example.md`, `findings-example.md`,
+  `implementation-log-example.md`, `project-example.md`, `briefs/`, `audits/`, `exp/`. Copy the
+  structure and the level of detail, not the content. Never edit `examples/`.
+
 ## The invariants
 
 1. **Slurm is the truth for job status.** Never write authoritative job state to a file;
@@ -122,6 +160,27 @@ research task it belonged to.
 - The self-test `ae submit ae-smoke && ae submit ae-smoke-dep --after ae-smoke`, then
   `ae harvest`, must yield `results/ae-smoke-dep/chain.json` with `"ran_after_parent": true`.
   Run it after any change to `bin/` or `lib/`, and once on every new cluster.
+
+## Changing the harness
+
+You may change the harness (`bin/`, `lib/`, `scripts/`, `templates/`, `selftest/`, `docs/`,
+`agent.md`) when the research needs it or when it has a defect. Follow these rules:
+
+1. The harness is a separate git repo (`slurm-agentic-engineering/`). Commit harness changes
+   there, never in the project repo. Push only when the owner asks.
+2. Make the smallest change that solves the problem. Keep `bin/` and `lib/` free of project
+   names; put cluster values in `config.sh` and cluster facts in `cluster/CARD.md`.
+3. Before you commit, run all four suites: `bash tests/test-preamble.sh`,
+   `bash tests/test-cli.sh`, `python3 tests/test_reset_project.py`,
+   `bash tests/test-e2e-local.sh`. Add or update a test for the behaviour you changed.
+4. After a change to `bin/` or `lib/`, run the Babel self-tests (`ae-smoke`, `ae-smoke-dep`,
+   and `ae-smoke-gen` for pool changes) before you use the change for real work.
+5. Running jobs do not change: each job script inlines the preamble at submit time. `ae` copies
+   `lib/standby.sh` and the tinker files again on the next `ae pool` / `ae tinker`.
+6. Record every harness change in `state/IMPLEMENTATION-LOG.md`: date, symptom, cause, change,
+   verification, and the rule that follows. Update `docs/` and this file when behaviour changes.
+7. Never change a harness file to make a result look better, and never weaken a guard (pinning,
+   dirty-tree refusal, harvest cap, tinker permissions) without the owner's instruction.
 
 ## Monitoring without burning agent tokens
 
@@ -196,6 +255,42 @@ whether the experiment distinguishes the hypotheses and whether implementation o
 artifacts could explain it. Investigate surprises instead of averaging them away or rerunning
 until the plot looks cleaner. Keep data used for selection decisions separate from data used for
 reported evaluation, as PROJECT.md specifies.
+
+## Precision in execution, monitoring and implementation
+
+- Be precise and accurate. Every statement must agree with the evidence that supports it: Slurm
+  output, files on disk, git, test output. Give the source when the claim is not obvious.
+- Before you act, verify the state that the action depends on. After you act, verify the result.
+  Do not report a step as done until you have seen the evidence.
+- Use exact identifiers: expid, job ID, commit SHA, file path, metric name, split. Give numbers
+  with their units, denominators and the date of measurement.
+- Monitor with the same precision: identify each event, find its cause, and record it. Do not
+  explain a failure before you have read its evidence (`ae logs`, `sacct`).
+- Implement with the same precision: read the code you change, make the smallest correct change,
+  test it, and examine the diff before you accept it.
+- If you do not know, write "unknown". If a result is partial, write "partial". Do not guess,
+  round away a problem, or report a plan as a result.
+
+## Writing standard
+
+Write every document, finding, log entry, report and brief in clear technical English. Follow
+the ASD-STE100 Simplified Technical English rules for approximately 80% of the text. Use normal
+technical English for the remainder when STE would lose precision (for example, a formula, a
+quoted error message, or a necessary technical term).
+
+- Write short sentences: procedural sentences ≤ 20 words; descriptive sentences ≤ 25 words.
+- Write one instruction per sentence. Use the imperative for instructions ("Run the self-test.").
+- Use the active voice. Write the agent of the action ("`ae harvest` writes the line.").
+- Use one word for one meaning. Use the same term for the same thing in all documents.
+- Use simple verb tenses: present, past, future. Do not use "-ing" forms as verbs where a simple
+  form is possible.
+- Do not use idioms, slang, metaphors or vague words ("seems", "basically", "quite").
+- Put a technical name in `code` format when it is a command, path, variable or identifier.
+- Start each document with its purpose. Put the most important fact first in each section.
+- Use tables and lists for data and steps. Keep paragraphs to ≤ 6 sentences.
+
+Example — not STE: "We basically saw the job getting killed, which seems like it was probably
+preemption." STE: "Slurm preempted job 1234567 at 12:41. The job requeued with the same ID."
 
 ## Auditing claims
 
