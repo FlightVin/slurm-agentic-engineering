@@ -40,6 +40,12 @@ expect "init created project CLAUDE.md -> agent.md" 'grep -q "agent.md" "$P/CLAU
 expect "CLAUDE.md pointer resolves" 'ref=$(grep -o "@[^ ]*agent.md" "$P/CLAUDE.md" | head -1 | cut -c2-); case "$ref" in /*) [ -f "$ref" ];; *) [ -f "$P/$ref" ];; esac'
 out=$("$AE" init 2>&1); expect "second ae init changes nothing" '! grep -qE "^  (create|reset) " <<<"$out"'
 
+echo "== first-run path (ae init --no-claude-md)"
+P2="$T/project2"; W2="$T/ws2"; mkdir -p "$P2"; git -C "$P2" init -q
+out=$(AE_REPO="$P2" AE_HOME="$W2" "$AE" paths 2>&1); expect "fresh workspace: paths reports config MISSING" 'grep -q "config: .*MISSING" <<<"$out"'
+AE_REPO="$P2" AE_HOME="$W2" "$AE" init --no-claude-md >/dev/null 2>&1
+expect "--no-claude-md: workspace created, project root untouched" '[ -f "$W2/config.sh" ] && [ -f "$W2/state/CHECKLIST.md" ] && [ ! -e "$P2/CLAUDE.md" ]'
+
 echo "== config validation"
 out=$("$AE" status 2>&1); rc=$?; expect "empty per-project config is refused" '[ $rc -ne 0 ] && grep -q "AE_REMOTE_REPO is not set" <<<"$out"'
 cat >> "$W/config.sh" <<'EOF'

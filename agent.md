@@ -13,7 +13,10 @@ project unless `AE_HOME` says otherwise (`ae paths` prints the resolved location
 
 ## Session bootstrap
 
-On session start, read in this order (~250 lines total):
+First, run `bin/ae paths` (from the harness directory; from the project root it is
+`./slurm-agentic-engineering/bin/ae paths`). If it reports `config: ... (MISSING ...)`, this is a
+**first run**: do "First run" below, then continue here. Otherwise read, in this order
+(~250 lines total):
 
 1. `state/STATE.md` — where the science stands
 2. `state/CHECKLIST.md` — the current plan and unfinished work
@@ -22,12 +25,53 @@ On session start, read in this order (~250 lines total):
 
 Then run `ae status`. That is the whole bootstrap; read more only when a question requires it.
 
-`ae` lives in `slurm-agentic-engineering/bin/`. Call it as `./slurm-agentic-engineering/bin/ae`
-from the project root, or put that directory on `PATH` once.
+`ae` lives in `slurm-agentic-engineering/bin/`. Call it as `bin/ae` when your working directory is
+the harness directory, or as `./slurm-agentic-engineering/bin/ae` from the project root. The same
+applies to `bin/ae-watch` and `bin/ae-capacity`. Every `ae` command below means that path.
 
-If the workspace documents are missing or still templates, the project is new: run `ae init`,
-then work with the owner to fill in `PROJECT.md` (the Babel `cluster/CARD.md` arrives filled; add
-project-specific notes to it as you verify them) before committing compute.
+## First run
+
+The owner's only actions are: clone this harness into the project and start Claude. You do
+everything else. Do the steps in order. Stop and report if a step fails; do not work around it.
+Ask the owner all questions in ONE message (step 3), with a recommended default for each.
+
+1. **Inspect the project.** The project repo is the parent directory (`ae paths` →
+   `project repo`). Record: current branch, `git remote get-url origin` (it must be a GitHub ssh
+   URL that Babel can reach), and `git status --porcelain` (uncommitted or untracked files).
+2. **Keep the harness out of the project's history.** If `.git/info/exclude` of the project does
+   not contain `slurm-agentic-engineering/`, append it. Then run `ae init --no-claude-md`.
+3. **Ask the owner (one message)**, with these defaults:
+   - Study branch (`AE_BRANCH`): default a new branch `<repo-name>-study` from the current
+     branch, pushed to origin. Alternative: the current branch.
+   - Uncommitted/untracked files: list them; default "commit tracked changes, add untracked
+     personal notes to `.git/info/exclude`". `ae submit` refuses a dirty tree.
+   - Babel clone path (`AE_REMOTE_REPO`): default `'$HOME/projects/<repo-name>'`.
+   - What the project is for, in a few sentences (input for `PROJECT.md`).
+4. **Apply the answers.** Set `AE_REMOTE_REPO` and `AE_BRANCH` in `config.sh` (keep the single
+   quotes). Clean the tree as agreed. Create and push the branch if one was chosen.
+5. **Check ssh.** Run `ssh -o BatchMode=yes babel true`. If it fails, show the owner the
+   `~/.ssh/config` block from `README.md` ("Before you start") and stop until they confirm; edit
+   `~/.ssh/config` only with their explicit permission. Then check Babel → GitHub:
+   `ssh babel 'ssh -o BatchMode=yes -T git@github.com'` must greet a GitHub user.
+6. **Clone on Babel** if absent:
+   `ssh babel 'test -d <path> || { mkdir -p "$(dirname <path>)" && git clone -b <branch> <origin-url> <path>; }'`.
+7. **`ae setup`** (it runs `ae doctor`). Require: `held:` for all three QOSes, `repo:` present,
+   `remote:` shows the branch. Report the `home:` free space.
+8. **Self-tests.** `ae submit ae-smoke`, `ae submit ae-smoke-dep --after ae-smoke`,
+   `ae submit ae-smoke-gen`. Wait with `bin/ae-watch --suppress-done ae-smoke --when-complete
+   'ae-smoke:3:selftest'` as a background task, then `ae harvest`. Pass criteria:
+   `results/ae-smoke-dep/chain.json` has `"ran_after_parent": true`; `results/ae-smoke/pin.json`
+   has `"pinned": true` and `qos` `preempt_cpu_qos`; `results/ae-smoke-gen/pool.json` has
+   `"partition": "general"` and `"user_data_mounted": "yes"`. The CPU queue can take an hour;
+   continue with step 9 while you wait.
+9. **Write `PROJECT.md` with the owner.** Read the project's README and entry points first, then
+   draft: objective, success criteria, constraints, how a run executes on Babel (environment
+   under `/data/user_data/$USER`, never `/home`; the real train/eval commands), `PROJ_DATA`, and
+   what each experiment must emit. Show the draft; apply corrections.
+10. **Initialise `state/STATE.md` and `state/CHECKLIST.md`** from `PROJECT.md`, and add a dated
+    "first-run setup" entry to `state/IMPLEMENTATION-LOG.md` (branch, paths, self-test result).
+11. **Report** in one short message: what is set up, the self-test result, and the proposed first
+    research step. Then continue with the normal loop.
 
 ## Before substantive work
 

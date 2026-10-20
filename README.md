@@ -14,9 +14,27 @@ card; nothing in `bin/` or `lib/` names a cluster.)
 - **Design:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · **Operator Q&A:** [`docs/OPERATOR.md`](docs/OPERATOR.md)
 - **History:** [`examples/`](examples/README.md) — the full record of a finished Babel study (read-only).
 
+## Quick start (two commands)
+
+```bash
+cd ~/path/to/your-project          # a git repo with a GitHub remote
+git clone git@github.com:FlightVin/slurm-agentic-engineering.git && cd slurm-agentic-engineering && claude
+```
+That is all. On the first start the agent sees that `config.sh` is missing and runs the
+**First run** procedure in [`agent.md`](agent.md): it excludes the harness from your project's
+history, runs `ae init`, asks you a few questions in one message (study branch, what to do with
+uncommitted files, Babel clone path, what the project is for), writes `config.sh`, clones the
+project on Babel, runs `ae setup` and the self-tests, writes `PROJECT.md` with you, and reports.
+It stops and asks if ssh to Babel is not set up yet (see "Before you start"). Claude asks you to
+approve each new command; choose "Yes, and don't ask again" for `bin/ae` once and the rest of the
+setup runs without prompts. To let the agent edit project code without a prompt per file, type
+`/add-dir ..` once in Claude, or start Claude in the project root and say "Read and follow
+`slurm-agentic-engineering/agent.md`". The manual steps
+below are the same procedure, for reference.
+
 > ### ✨ Let the agent do the work
-> You do not have to type the `ae` commands yourself. After step 2 below, start Claude in the
-> harness directory (`cd slurm-agentic-engineering && claude`) and ask in plain language. The
+> You do not have to type the `ae` commands yourself. Start Claude in the harness directory
+> (`cd slurm-agentic-engineering && claude`) and ask in plain language. The
 > agent knows every command from `agent.md`. For example:
 > - *"Set up this harness for my project. The Babel clone should live at `~/projects/myproject`
 >   and we work on `main`."* — it fills in `config.sh`, clones the project on Babel, and runs
@@ -58,7 +76,7 @@ card; nothing in `bin/` or `lib/` names a cluster.)
    **Babel tools:** git and tmux exist already. Install Claude Code under your home only if you
    want tinkers (compute-side agents).
 
-## Add the harness to a project (once per project)
+## Add the harness to a project manually (what the first run does)
 
 The project must be a git repo with a GitHub remote, on the branch you work on.
 
