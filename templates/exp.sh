@@ -3,15 +3,17 @@
 # `ae submit` inlines it into a generated, self-contained job script.
 #
 # Header (parsed by ae; defaults come from config.sh):
-#   gpus=N    0 routes to the CPU-only QOS automatically (the GPU QOS has
-#             MinTRES=gres/gpu=1 and a 0-GPU job there pends forever)
-#   cpus=N    time=HH:MM:SS   after=expid[,expid]
-#   part=auto|general|<partition>   (default AE_PARTITION from config.sh)
-#             general  = the optional second pool, AE_PARTITION_GEN (e.g. non-preemptible)
+#   gpus=N    0 routes to preempt_cpu_qos automatically (preempt_qos and normal both
+#             have MinTRES=gres/gpu=1, so a 0-GPU job there pends forever)
+#   cpus=N    time=HH:MM:SS (default 08:00:00; Babel's own default is 30 min)   after=expid[,expid]
+#   part=preempt|general|auto   (default preempt)
+#             preempt  = 24 GPUs, 31-day wall, preemptible (requeue-safe via phases)
+#             general  = 8 GPUs, 2-day wall, NOT preemptible; > 2 days is refused
 #             auto     = ask both pools for a start estimate, take the earlier
-#             gpus=0 always runs on the CPU-only QOS (AE_QOS_CPU) regardless of part=
-#             With no second pool configured, general/auto fall back to AE_PARTITION.
-#   exclude=<nodes>  constraint=<features>  mem=<size>  gtype=<GRES type>
+#             gpus=0 always runs on preempt_cpu_qos regardless of part=
+#   exclude=<nodes>  constraint=<features, e.g. VRAM_80GB|VRAM_96GB>  mem=<size>
+#   gtype=<GRES type, case-sensitive: A6000 L40S A100_80GB H100 H200 6000Ada ...>
+#   For flex-attention jobs, exclude the RTX_PRO_6000 nodes (list in cluster/CARD.md).
 #EXP gpus=1 cpus=4 time=02:00:00
 
 # HYPOTHESIS: <what this run is supposed to tell you. One or two lines.>
@@ -27,8 +29,9 @@
 #   read by you on the laptop       -> $AE_RESULTS (small; harvested; <= AE_HARVEST_MAX_KB)
 #   throwaway scratch for this run  -> $AE_RUNDIR
 #
-# $PROJ_DATA is compute storage shared between compute nodes. It may not be mounted
-# on the login node or the laptop -- which is why distillates go to $AE_RESULTS.
+# On Babel $PROJ_DATA lives under /data/user_data/$USER (500 GB, shared between compute
+# nodes, NOT mounted on the login node) -- which is why distillates go to $AE_RESULTS.
+# Never write checkpoints to $AE_RUNDIR: it is under /home (100 GB, shared by every job).
 #   $AE_ROOT     the remote harness root; stable across runs (see selftest/)
 #
 # EXPORT any variable a phase uses. `phase` runs a child shell; a set-but-not-
@@ -44,7 +47,7 @@
 #   All three exist because each silently turned a failure into a pass in a real
 #   run. If a command in your phase is allowed to fail, write `cmd || true`.
 
-export PROJ_DATA="${PROJ_DATA:-/path/on/compute/to/project-data}"   # from PROJECT.md "Data and paths"
+export PROJ_DATA="${PROJ_DATA:-/data/user_data/$USER/<project>}"   # from PROJECT.md "Data and paths"
 
 phase example "test -f $AE_RESULTS/summary.json" "
     echo 'replace me with real work'

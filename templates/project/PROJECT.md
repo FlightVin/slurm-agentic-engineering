@@ -26,13 +26,14 @@
 
 ## How a run executes
 <!-- Entry points, environment, the command an experiment's phases call. -->
-- Environment: <how to activate on the cluster>
+- Environment: <how to activate on Babel, e.g. a conda env under /data/user_data/$USER/envs/>
 - Training / evaluation entry point: <command>
 
 ## Data and paths
 <!-- Where datasets and checkpoints live on COMPUTE storage. Anything a later experiment consumes
-     goes here, never in $AE_RESULTS. -->
-- PROJ_DATA: <compute-side path>
+     goes here, never in $AE_RESULTS. On Babel: /data/user_data/$USER (500 GB, compute nodes
+     only); /data/hf_cache and /data/datasets are shared read-mostly caches. -->
+- PROJ_DATA: /data/user_data/$USER/<project>
 
 ## What a finished experiment must emit
 <!-- The small distillate written to $AE_RESULTS (harvested; stays under AE_HARVEST_MAX_KB). -->

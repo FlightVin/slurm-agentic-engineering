@@ -28,7 +28,7 @@ STATE="$AE_HOME/state"; LEDGER="$STATE/LEDGER.jsonl"
 
 load_config() {
     [ -f "$AE_HOME/config.sh" ] || die "no site config at $AE_HOME/config.sh
-    Run 'ae init' (creates it from config.example.sh), then fill in the cluster values."
+    Run 'ae init' (creates it from the Babel config.example.sh), then set AE_REMOTE_REPO and AE_BRANCH."
     # shellcheck disable=SC1091
     . "$AE_HOME/config.sh"
     # Optional settings: unset = feature off / documented default.
