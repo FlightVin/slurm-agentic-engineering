@@ -80,9 +80,6 @@ Mechanics (facts, not advice):
   jobs started within minutes). Treat them as an upper bound.
 - **Shared nodes:** `pgrep`/`pkill -f` see other users' processes; add `-u $USER`. A `pkill -f
   PATTERN` inside `bash -c "..."` also matches its own command line; write `[p]attern`.
-- **Sizing RL jobs:** each gymnasium `AsyncVectorEnv` worker is a process; 32 eval workers used
-  ~18 GB PSS before the first eval and a 32 GB / 4-CPU allocation was OOM-killed at the first eval.
-  4 CPUs also roughly halved a 1-GPU RL loop vs 24 CPUs. Request CPUs and memory for env workers.
 
 ## Preemption
 `PreemptType=preempt/qos`, `PreemptMode=REQUEUE`,
