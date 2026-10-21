@@ -7,6 +7,7 @@
 /inv/
 /results/
 /log/
+/reports/
 /.reset-backups/
 /.ae-watch-wm
 # ---- runtime / local artifacts ----

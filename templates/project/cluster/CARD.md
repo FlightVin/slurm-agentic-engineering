@@ -70,6 +70,20 @@ Mechanics (facts, not advice):
   loops — use `ssh -n`.
 - A held job with reason `launch_failed_requeued_held` pends forever; `ae pool` releases it.
 
+## Traps NOT handled by `ae` (verified 2026-10-20/21 — re-verify)
+- **`srun` is refused on `preempt`** ("Only `sbatch` jobs are allowed"). On `general`,
+  `srun --jobid=<running job> --overlap -n1 <cmd>` works for quick checks inside a held allocation.
+- **The login node's view of `/home` lags compute-node writes** (minutes). To read fresh compute
+  output, read it from a compute node: `srun --jobid=<j> --overlap -n1 tar -C <dir> -cf - . | tar -xf -`.
+- **`squeue %m` shows `MinMemoryTRES`, not the requested memory**; check `scontrol show job` `ReqTRES`.
+- **`sbatch --test-only` estimates can be far too pessimistic** on `general` (+34 h shown while
+  jobs started within minutes). Treat them as an upper bound.
+- **Shared nodes:** `pgrep`/`pkill -f` see other users' processes; add `-u $USER`. A `pkill -f
+  PATTERN` inside `bash -c "..."` also matches its own command line; write `[p]attern`.
+- **Sizing RL jobs:** each gymnasium `AsyncVectorEnv` worker is a process; 32 eval workers used
+  ~18 GB PSS before the first eval and a 32 GB / 4-CPU allocation was OOM-killed at the first eval.
+  4 CPUs also roughly halved a 1-GPU RL loop vs 24 CPUs. Request CPUs and memory for env workers.
+
 ## Preemption
 `PreemptType=preempt/qos`, `PreemptMode=REQUEUE`,
 `PreemptParameters=youngest_first,send_user_signal`, GraceTime **2 min**.
