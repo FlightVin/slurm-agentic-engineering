@@ -41,6 +41,11 @@ log "restart=${SLURM_RESTART_COUNT:-0}  qos=${SLURM_JOB_QOS:-?}  part=${SLURM_JO
 [ "${SLURM_RESTART_COUNT:-0}" -gt 0 ] && log "*** REQUEUE ATTEMPT #${SLURM_RESTART_COUNT} (appending to same log) ***"
 
 mkdir -p "$AE_RUNDIR" "$AE_RESULTS"
+# Preemption notice for the child. USR1 reaches only this shell (--signal=B:USR1), and
+# the child is SIGKILLed within ~1 s of the SIGTERM that follows (measured 2026-10-22 with
+# scontrol requeue). A child that must checkpoint in the grace window watches this file.
+export AE_PREEMPT_FLAG="$AE_RUNDIR/.ae-preempt-notice"
+rm -f "$AE_PREEMPT_FLAG"
 
 # --- signal handling ------------------------------------------------------
 # PreemptParameters=send_user_signal means USR1 arrives on PREEMPTION too, not
@@ -68,6 +73,7 @@ _left_secs() {
     esac
 }
 on_usr1() {
+    date +%s > "$AE_PREEMPT_FLAG"; log "*** USR1: wrote preemption notice $AE_PREEMPT_FLAG"
     local s; s=$(_left_secs)
     # Which misclassification is worse decides the default:
     #   wrongly "walltime"  -> we self-requeue during a preemption; Slurm would have

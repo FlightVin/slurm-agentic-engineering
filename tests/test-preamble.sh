@@ -25,4 +25,22 @@ check ""           ""        # unknown    -> self-requeue (never break the chain
 check "UNLIMITED"  inf       # no limit   -> must NOT read as 0s
 check "INVALID"    inf
 check "garbage"    ""
+# on_usr1 must write the preemption notice for the child in BOTH branches (preemption and
+# near-walltime), and self-requeue only near the walltime. (Added 2026-10-22: the child is
+# SIGKILLed ~1 s after SIGTERM, so the notice file is its only early warning.)
+USR1FN=$(awk '/^on_usr1\(\) \{/,/^\}/' "$SRC")
+tmpd=$(mktemp -d); requeued=""
+eval "log(){ :; }; scontrol(){ requeued=\"\$*\"; }; $USR1FN"
+for case in "18000 no" "100 yes"; do
+    set -- $case; left=$1; want_rq=$2; requeued=""
+    eval "_left_secs(){ echo $left; }"
+    AE_PREEMPT_FLAG="$tmpd/notice-$left"; on_usr1
+    got_rq=no; [ -n "$requeued" ] && got_rq=yes
+    if [ -s "$AE_PREEMPT_FLAG" ] && grep -qE '^[0-9]+$' "$AE_PREEMPT_FLAG" && [ "$got_rq" = "$want_rq" ]; then
+        echo "  ok    on_usr1 left=${left}s -> notice written, requeue=$got_rq"
+    else
+        echo "  FAIL  on_usr1 left=${left}s -> notice '$(cat "$AE_PREEMPT_FLAG" 2>/dev/null)', requeue=$got_rq want $want_rq"; fail=1
+    fi
+done
+rm -rf "$tmpd"
 [ $fail -eq 0 ] && echo "PASS" || { echo "FAIL"; exit 1; }
