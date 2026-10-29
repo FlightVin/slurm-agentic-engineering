@@ -16,7 +16,10 @@
       "Bash(bash tests/test-preamble.sh)",
       "Bash(bash tests/test-cli.sh)",
       "Bash(bash tests/test-e2e-local.sh)",
-      "Bash(python3 tests/test_reset_project.py)"
+      "Bash(python3 tests/test_reset_project.py)",
+      "Bash(bash -n *)",
+      "Bash(date *)",
+      "Bash(date)"
     ]
   }
 }

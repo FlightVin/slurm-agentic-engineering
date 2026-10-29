@@ -1,37 +1,42 @@
 # Operator guide
 
-## 1. What do I fill in manually?
-Only two things:
-- **`PROJECT.md`** — the science: question, hypothesis, how a run executes, where
-  data lives, what a finished experiment must emit. This is the plug-in point.
-- **`exp/<expid>.sh`** — one per experiment, ~15 lines, from `templates/exp.sh`.
+This guide answers the questions an operator asks most often, in the order they come up: what to
+fill in, how to set up, how work runs, and what happens when something breaks.
 
-Plus two values in `config.sh` (`AE_REMOTE_REPO`, `AE_BRANCH`); the rest of it is Babel's
-measured configuration. Edit more only if Babel's quotas change (`ae doctor` shows live values)
-or you port to another cluster. Nothing else.
+## 1. What do I fill in manually?
+You own two documents, which the agent drafts with you, and two config values:
+- **`PROJECT.md`** — the science: question, hypothesis, how a run executes, where data lives, and
+  what a finished experiment must emit. This is where your project plugs in.
+- **`exp/<expid>.sh`** — one per experiment, about 15 lines, from `templates/exp.sh`.
+
+The two config values are `AE_REMOTE_REPO` and `AE_BRANCH` in `config.sh`. The rest of `config.sh` is
+Babel's measured configuration. Edit more only if Babel's quotas change (`ae doctor` shows the
+live values) or you port the harness to another cluster. Nothing else needs editing.
 
 ## 2. One-time setup
-Once per project and laptop:
-1. `~/.ssh/config` — `ControlMaster auto`, `ControlPath ~/.ssh/cm-%r@%h:%p`,
-   `ControlPersist 10m`, `ServerAliveInterval 15`, plus a `Host babel-*` wildcard for compute nodes.
-   **Mandatory**: unmultiplexed auth measured 5–31 s per command.
-2. Keep the harness out of the project's history: add `slurm-agentic-engineering/` and
-   `.claude/settings.local.json` to the project's `.git/info/exclude` (or `.gitignore`).
-3. `ae init` — creates the workspace documents (incl. the Babel `cluster/CARD.md` and
-   `cluster/BABEL.md`) and `config.sh` from templates; set `AE_REMOTE_REPO` and `AE_BRANCH`.
-4. `ae setup` — creates `~/ae/{jobs,code,work,out,results,inv}` on the cluster and
-   verifies ssh, git remote access, the QOSes you hold, live quotas vs `config.sh`, and /home space.
-5. `ae pool cpu` — brings up standby capacity.
-6. Self-tests: `ae submit ae-smoke && ae submit ae-smoke-dep --after ae-smoke`, and
+Do these steps once per project and laptop. On a new project the agent's first run does steps 2–6
+for you (agent.md, "First run").
+1. **`~/.ssh/config`** (once per laptop). Set `ControlMaster auto`, `ControlPath ~/.ssh/cm-%r@%h:%p`,
+   `ControlPersist 10m`, `ServerAliveInterval 15`, and add a `Host babel-*` wildcard for compute
+   nodes. This is **mandatory**: without multiplexing, authentication took 5–31 s per command.
+2. **Keep the harness out of the project's history.** Add `slurm-agentic-engineering/` to the
+   project's `.git/info/exclude`.
+3. **`ae init`** creates the workspace documents (including the Babel `cluster/CARD.md` and
+   `cluster/BABEL.md`) and `config.sh` from templates. Then set `AE_REMOTE_REPO` and `AE_BRANCH`.
+4. **`ae setup`** creates `~/ae/{jobs,code,work,out,results,inv,run}` on the cluster. It verifies ssh,
+   git remote access, the QOSes you hold, live quotas against `config.sh`, and /home space.
+5. **`ae pool cpu`** (optional, when tinkers will run) starts CPU standby capacity.
+6. **Self-tests:** `ae submit ae-smoke && ae submit ae-smoke-dep --after ae-smoke`, and
    `ae submit ae-smoke-gen` for the general pool.
 
 ## 3. What command starts the orchestrator?
 ```
-cd <repo> && claude
+cd <repo>/slurm-agentic-engineering && claude
 ```
-There is no server. The project's `CLAUDE.md` (created by `ae init`) loads `agent.md`; the
-session reads `STATE.md`,
-`cluster/CARD.md`, `PROJECT.md`, runs `ae status`, and is oriented.
+There is no server. The harness's `CLAUDE.md` loads `agent.md`. (If you start Claude in the project
+root instead, the project needs a `CLAUDE.md` that imports `agent.md`: `ae init` without
+`--no-claude-md` writes one.) The session then reads `state/STATE.md`, `state/CHECKLIST.md`,
+`cluster/CARD.md` and `PROJECT.md`, runs `ae status`, and is ready to work.
 Add `slurm-agentic-engineering/bin` to `PATH`, or call `./slurm-agentic-engineering/bin/ae`.
 
 ## 4. How do I specify a hypothesis/experiment?
@@ -41,81 +46,107 @@ Tell Claude in plain words. It writes `exp/<expid>.sh`:
 # HYPOTHESIS: <one or two lines>
 phase <name> "<done-predicate>" "<command>"
 ```
-`gpus=0` is routed to the CPU QOS automatically. The done-predicate is what makes
-a requeue cheap — a finished phase must be skippable in seconds.
+`after=<other-expid>` is the same as `ae submit --after`.
+`ae` routes `gpus=0` to the CPU QOS automatically. The done-predicate makes a requeue cheap: a
+finished phase must be skippable in seconds.
 
-## 5. How does it start and condition a tinkering agent?
+## 5. How does it start and brief a tinker?
 ```
 ae tinker <id> < brief.md          # branch + brief + launch, one step
 ae tinker <id> --gpu < brief.md    # only if the work truly needs a GPU
 ```
-The brief (from `templates/inv.md`) states Objective, Scope, **Do NOT**, a
-Success criterion as an exact command, and the report format. The agent gets that
-plus `lib/tinker-bootstrap.md` and a least-privilege allowlist. It can run git and
-tests; it **cannot** submit jobs, push to the authoritative branch, force-push,
-`rm -rf`, or ssh out.
+The brief (from `templates/inv.md`) states the Objective, the Scope, a **Do NOT** section, a
+Success criterion as an exact command, and the report format. The tinker receives the brief,
+`lib/tinker-bootstrap.md`, and a least-privilege allowlist. It can run tests and the git
+commands its allowlist names (commit, push to `inv/<id>`; not `fetch`, `merge` or `reset --hard`). It
+**cannot** submit jobs, push to the authoritative branch, force-push, run `rm -rf`, or ssh out.
 
 ## 6. How does validated code get promoted?
 ```
 ae report <id>     # its report + the commits on inv/<id>
 ae accept <id>     # squash-merge into the authoritative branch, push
 ```
-You review before accepting. The `inv/<id>` branch is kept as the WIP archive.
+You review before you accept. The `inv/<id>` branch stays as the archive of work in progress.
 A failed investigation is simply never accepted; nothing is deleted.
 
 ## 7. How does it launch an experiment?
 ```
 ae submit <expid> [--after a,b] [--replace]
 ```
-Refuses a dirty tree → checks GPU/submit quota → pushes → resolves the sha →
-creates a **detached worktree** at that sha → generates a self-contained job
-script → `sbatch` → writes the ledger line (recording both the project `sha` and
-the recipe `expsha`). Dependencies use `afterany` plus each job's own precondition
-check. Other commands: `ae cancel <expid>`, `ae attach [tier]`,
-`ae investigate <id>` / `ae launch <id>` (the two halves of `ae tinker`).
+The steps, in order:
+1. Check that the laptop is on `AE_BRANCH`.
+2. Refuse if the expid is already queued or running (`--replace` cancels it first).
+3. Check the submit quota: refuse when it is full. Over the GPU quota, only print a note: the job pends.
+4. Refuse a dirty tree, push, and resolve the sha.
+5. Generate a self-contained job script, check its syntax, and copy it to the cluster.
+6. Create a **detached worktree** at that sha (once per expid and sha).
+7. `sbatch`, then write the ledger line, which records the project `sha` and the recipe `expsha`.
+
+Dependencies use `afterany`, and each job checks its own precondition. Related commands:
+`ae cancel <expid>`, `ae slurm ...` (quoted Slurm queries; job control on this project's jobs only), `ae attach [tier]`, and `ae investigate <id>` / `ae launch <id>` (the two
+halves of `ae tinker`).
 
 ## 8. How do results return?
-The job writes small distillates to `$AE_RESULTS`. Then:
+The job writes small distillates to `$AE_RESULTS`. Then run:
 ```
 ae harvest          # anything finished and not yet harvested
 ```
-rsyncs `results/<expid>/`, appends one line to `state/FINDINGS.md`, saves a 40-line
-log tail, and copies the generated job script to `results/<expid>/job.sh` so the
-folder fully describes what produced it. It refuses to mark an experiment
-harvested if the remote had artefacts and none were copied. Capped at `AE_HARVEST_MAX_KB` per experiment (default 2 MB) — if a job wants to return more,
-fix the job; raise the cap only deliberately. Checkpoints and datasets never come home.
+For each finished experiment, `ae harvest`:
+- rsyncs `results/<expid>/` and appends one line to `state/FINDINGS.md`;
+- saves a 40-line log tail;
+- copies the generated job script to `results/<expid>/job.sh`, so the folder fully describes what
+  produced it.
+
+It refuses to mark an experiment harvested if the remote had artifacts and none were copied. The
+marker `results/<expid>/.harvested` holds the commit, the recipe hash and the job id, so a
+resubmission with the same commit and recipe is harvested again. The previous harvest moves to
+`results/<expid>/.prev-<oldjob>-<time>/`. Such a resubmission writes to the same `$AE_RESULTS` directory
+on the cluster, so phases whose done-check already passes are skipped. To recompute them, change the
+recipe (a new `expsha`) or remove the old outputs first.
+
+The harvest is capped at `AE_HARVEST_MAX_KB` per experiment (default 2 MB). If a job wants to
+return more, fix the job; raise the cap only as a deliberate decision. Checkpoints and datasets
+never come home.
 
 ## 9. How does it decide the next experiment?
-You and Claude read `results/` and `FINDINGS.md`, update `STATE.md`, and write the
-next `exp/*.sh`. Pre-declared chains are submitted up front with `--after`, so
-they need no babysitting. Judgement calls go to `state/DECISIONS.md`.
+You and Claude read `results/` and `FINDINGS.md`, update `STATE.md`, and write the next
+`exp/*.sh`. Submit pre-declared chains up front with `--after`, so they need no supervision.
+Record judgement calls in `state/DECISIONS.md`.
 
-**Automatic harvest:** run the poll on an interval, e.g. Claude Code's
-`/loop 20m` with `ae status --changed && ae harvest`. `--changed` prints
-`no change` when nothing is new, so idle wakes are cheap.
+**Automatic harvest:** run `bin/ae-watch` as a background task. It wakes the agent only when a job
+ends, and the agent then runs `ae harvest`. Do not build an agent polling loop (`agent.md`). A
+scheduled check-in (for example Claude Code's `/loop`) is fine when the owner asks for one.
 
 ## 10. How does standby work?
-Three tiers on Babel: **CPU** (`preempt_cpu_qos`, 0 GPUs, separate quota), **preempt GPU** (1 of
-the preempt GPU quota each) and **general GPU** (1 of the general GPU quota each, not preemptible).
-Start times are not fixed; the agent measures them on first run (`cluster/CARD.md`).
-`ae pool cpu` holds CPU standby only; plain `ae pool` also holds GPU standby in both pools (4 GPUs
-of quota with the default sizes), and `--gpu` takes whichever is running. Which tiers to hold is
-the owner's preference or the agent's measured choice. Tinkering defaults to CPU. Each holds a long-lived tmux server that agents attach to as
-windows. `--requeue` means a preempted standby returns under the same JobID by
-itself; `ae pool` only tops up after a terminal end (12 h CPU / 24 h preempt GPU / 2 days general),
-and `ae launch` tops up automatically if no standby is running.
+Babel has three standby tiers:
+- **CPU** — `preempt_cpu_qos`, 0 GPUs, separate quota.
+- **preempt GPU** — each uses 1 of the preempt GPU quota.
+- **general GPU** — each uses 1 of the general GPU quota; not preemptible.
+
+Start times are not fixed; the agent measures them on the first run (`cluster/CARD.md`).
+`ae pool cpu` holds CPU standby only. Plain `ae pool` also holds GPU standby in both pools (4 GPUs
+of quota with the default sizes), and `--gpu` takes whichever GPU standby is running. Which tiers to
+hold is the owner's preference or the agent's measured choice. Tinkering defaults to CPU.
+
+Each standby holds a long-lived tmux server, and tinkers attach to it as windows. Recovery works
+as follows:
+- Because of `--requeue`, a preempted standby returns under the same JobID by itself.
+- `ae pool` replaces a standby only when it ends for good, normally at its wall-time limit (12 h
+  CPU / 24 h preempt GPU / 2 days general GPU).
+- `ae launch` stops if no standby is running. `ae launch <id> --topup` fills that tier only, up to its pool size.
+- `AE_DBG_EXCLUDE` in config.sh keeps standbys off known-bad nodes.
 
 ## 11. What happens after preemption/reboot?
-- **Experiment preempted** → Slurm requeues the same JobID, the pinned worktree is
-  unchanged, finished phases skip in seconds. You do nothing.
-- **Standby preempted** → returns by itself in 2–5 min; before dying it
-  **commits and pushes every dirty dev worktree**.
-- **Tinkering agent lost** → `ae launch <id>` again; it re-orients from the brief
-  and its own `git log`.
-- **Laptop restarted** → `cd <repo> && claude`. Nothing was in the session.
-- **A job genuinely FAILED** → `ae logs <expid>` for a bounded slice, `LEDGER.jsonl`
-  for the exact sha. Never auto-retried, by design.
+- **Experiment preempted** → Slurm requeues the same JobID. The pinned worktree is unchanged, and
+  finished phases skip in seconds. You do nothing.
+- **Standby preempted** → it returns by itself under the same JobID. Before it ends, it **commits and pushes
+  every dirty dev worktree**.
+- **Tinker lost** → run `ae launch <id>` again. The tinker re-orients from the brief and
+  its own `git log`.
+- **Laptop restarted** → `cd <repo>/slurm-agentic-engineering && claude`. The session held no state.
+- **A job genuinely FAILED** → read `ae logs <expid>` for a bounded slice, and `LEDGER.jsonl` for
+  the exact sha. The harness never retries it automatically; this is by design.
 
 ## 12. What does a fresh session read first?
-`CLAUDE.md` → `agent.md` (auto-loaded) → `state/STATE.md` → `cluster/CARD.md` →
-`PROJECT.md` → `ae status`. About 250 lines. Everything else is grep-on-demand.
+`CLAUDE.md` → `agent.md` (auto-loaded) → `bin/ae paths` (first run if `config.sh` is missing) → `state/STATE.md` → `state/CHECKLIST.md` → `cluster/CARD.md` →
+`PROJECT.md` → `ae status`. This is about 250 lines. Read everything else with grep, on demand.

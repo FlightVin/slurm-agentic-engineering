@@ -8,6 +8,7 @@
 /results/
 /log/
 /reports/
+/context/
 /.reset-backups/
 /.ae-watch-wm
 # ---- runtime / local artifacts ----

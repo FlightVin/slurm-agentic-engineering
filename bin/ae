@@ -40,6 +40,7 @@ load_config() {
     : "${AE_DBG_CPU_NAME:=ae-dbg-cpu}" "${AE_DBG_CPU_CPUS:=4}" "${AE_DBG_CPU_TIME:=12:00:00}" "${AE_DBG_CPU_POOL:=2}"
     : "${AE_DBG_GEN_NAME:=ae-dbg-gen}" "${AE_DBG_GEN_GPUS:=1}" "${AE_DBG_GEN_CPUS:=4}" "${AE_DBG_GEN_TIME:=24:00:00}" "${AE_DBG_GEN_POOL:=0}"
     : "${AE_MAX_GPUS_PER_USER:=0}" "${AE_MAX_SUBMIT:=100}" "${AE_HARVEST_MAX_KB:=2048}"
+    : "${AE_DBG_EXCLUDE:=}"
     : "${AE_AGENT_CMD:=claude --permission-mode acceptEdits}"
     local v
     for v in AE_HOST AE_REMOTE_REPO AE_BRANCH AE_PARTITION AE_QOS_GPU AE_QOS_CPU; do
@@ -123,6 +124,17 @@ ledger_job() { grep "\"expid\": *\"$1\"" "$LEDGER" 2>/dev/null | tail -1 | sed '
 valid_jobid() { case "${1:-}" in ''|*[!0-9_]*) return 1;; *) return 0;; esac; }
 ledger_expsha() { grep "\"expid\": *\"$1\"" "$LEDGER" 2>/dev/null | tail -1 | sed 's/.*"expsha": *"\([^"]*\)".*/\1/'; }
 ledger_sha() { grep "\"expid\": *\"$1\"" "$LEDGER" 2>/dev/null | tail -1 | sed 's/.*"sha": *"\([^"]*\)".*/\1/'; }
+# Harvest marker: results/<expid>/.harvested holds the ident (<sha7>-<expsha>) and the job id.
+# The ident alone is not enough: a resubmission with the same commit and recipe writes to
+# the same remote results dir under a NEW job id, and must be harvested again. A marker
+# without a job= line (written before this rule) matches on the ident only.
+harvest_ident() { echo "$(ledger_sha "$1" | cut -c1-7)-$(ledger_expsha "$1")"; }
+is_harvested() {
+    local f="$AE_HOME/results/$1/.harvested"
+    [ -f "$f" ] && grep -qxF "$(harvest_ident "$1")" "$f" || return 1
+    local jl; jl=$(grep '^job=' "$f" | tail -1)
+    [ -z "$jl" ] || [ "$jl" = "job=$(ledger_job "$1")" ]
+}
 ledger_exps(){ sed 's/.*"expid":"\([^"]*\)".*/\1/' "$LEDGER" 2>/dev/null | awk '!seen[$0]++'; }
 
 # --- #EXP header parsing ---------------------------------------------------
@@ -267,7 +279,7 @@ _pool_tier() {
     info "standby[$name]: $have alive, want $want"
     local i jid
     for (( i=have; i<want; i++ )); do
-        jid=$(rsh "sbatch --parsable -p $part -q $qos $gres -c $cpus -t $tlim -J $name --requeue --signal=$AE_SIGNAL --open-mode=append --export=ALL,AE_ROOT=$RROOT -o $RROOT/out/%j_$name.out $RROOT/standby.sh")
+        jid=$(rsh "sbatch --parsable -p $part -q $qos $gres ${AE_DBG_EXCLUDE:+--exclude=$AE_DBG_EXCLUDE} -c $cpus -t $tlim -J $name --requeue --signal=$AE_SIGNAL --open-mode=append --export=ALL,AE_ROOT=$RROOT -o $RROOT/out/%j_$name.out $RROOT/standby.sh")
         [ -n "$jid" ] && info "  submitted $jid"
     done
 }
@@ -276,7 +288,8 @@ cmd_standby_list() {
 }
 # Oldest RUNNING standby across a comma-separated list of standby names: oldest
 # because PreemptParameters=youngest_first makes it the least likely to be taken next.
-oldest_dbg() { rsh "squeue -h -u \$USER -n ${1:-$AE_DBG_CPU_NAME} -t R -o '%M %i' | sort -r | head -1 | awk '{print \$2}'"; }
+# %S (start time, ISO-8601) sorts correctly as text; %M (elapsed, e.g. 1-02:00:00 vs 9:59) does not.
+oldest_dbg() { rsh "squeue -h -u \$USER -n ${1:-$AE_DBG_CPU_NAME} -t R -o '%S %i' | sort | head -1 | awk '{print \$2}'"; }
 
 cmd_attach() {
     load_config; ensure_link
@@ -450,6 +463,55 @@ QOSMaxGRESPerUser until one frees. That is expected for a fleet larger than the 
     echo "submitted $expid  job=$jid  sha=$short  recipe=$esha  part=$partition  qos=$qos  gpus=$gpus  time=$tlim${after:+  after=$after}"
 }
 
+# ae slurm <sub> [args...]: Slurm access for the agent through ONE pre-approvable command.
+# Every argument is shell-quoted for the remote shell (printf %q), so no argument can
+# chain another command. Read-only subcommands take any arguments. Job-control
+# subcommands take numeric job ids only, and only ids this project created: a ledger
+# row, or a standby of this harness (AE_DBG_* names). No -u/--user, no name patterns.
+SLURM_RO="squeue sacct sinfo sprio sstat show"
+SLURM_RW="cancel hold release requeue requeuehold update"
+own_job() {   # own_job <jobid>: in the ledger, or a live standby of this harness
+    grep -q "\"jobid\": *\"$1\"" "$LEDGER" 2>/dev/null && return 0
+    local n; n=$(rsh "squeue -h -j $1 -o %j 2>/dev/null" | head -1)
+    case "$n" in "$AE_DBG_NAME"|"$AE_DBG_CPU_NAME"|"$AE_DBG_GEN_NAME") return 0;; esac
+    return 1
+}
+cmd_slurm() {
+    load_config; ensure_link
+    local sub="${1:-}"; [ $# -gt 0 ] && shift
+    local q a
+    case " $SLURM_RO " in *" $sub "*)
+        q=$(printf '%q ' "$@")
+        case "$sub" in show) rsh "scontrol show $q";; *) rsh "$sub $q";; esac
+        return;;
+    esac
+    case " $SLURM_RW " in *" $sub "*) ;; *)
+        die "ae slurm: unknown subcommand '$sub' (read: $SLURM_RO; job control: $SLURM_RW)";;
+    esac
+    [ $# -gt 0 ] || die "ae slurm $sub: give at least one job id"
+    local ids=() kv=()
+    if [ "$sub" = "update" ]; then
+        # update <jobid> Key=Value...; only keys needed to move or re-point own jobs
+        valid_jobid "$1" || die "ae slurm update: first argument must be a job id"
+        ids=("$1"); shift
+        [ $# -gt 0 ] || die "ae slurm update: give Key=Value pairs"
+        for a in "$@"; do
+            case "$a" in
+                Partition=*|QOS=*|ExcNodeList=*|Dependency=*|Features=*|TimeLimit=*|NumCPUs=*|MinMemoryNode=*|Gres=*|TresPerNode=*) kv+=("$a");;
+                *) die "ae slurm update: key not allowed: '${a%%=*}'";;
+            esac
+        done
+    else
+        for a in "$@"; do valid_jobid "$a" || die "ae slurm $sub: job ids only (got '$a')"; ids+=("$a"); done
+    fi
+    for a in "${ids[@]}"; do own_job "$a" || die "ae slurm $sub: job $a is not this project's (not in the ledger, not a standby)"; done
+    case "$sub" in
+        cancel) q=$(printf '%q ' "${ids[@]}"); rsh "scancel $q";;
+        update) q=$(printf '%q ' "JobId=${ids[0]}" ${kv[@]+"${kv[@]}"}); rsh "scontrol update $q";;
+        *)      q=$(printf '%q ' "${ids[@]}"); rsh "scontrol $sub $q";;
+    esac && echo "ae slurm $sub: ok (${ids[*]})"
+}
+
 cmd_cancel() { load_config; ensure_link; local j; j=$(rsh "squeue -h -u \$USER -n ae-$1 -o %i"|head -1); [ -n "$j" ] && rsh "scancel $j" && echo "cancelled $1 ($j)" || echo "$1 not live"; }
 
 cmd_status() {
@@ -479,8 +541,7 @@ cmd_status() {
         else
             local st; st=$(echo "$acct_all" | awk -F'|' -v id="$j" '$1==id {print $2; exit}')
             [ -n "$st" ] || st="UNKNOWN"
-            local id2; id2="$(ledger_sha "$e" | cut -c1-7)-$(ledger_expsha "$e")"
-            if [ "$(cat "$AE_HOME/results/$e/.harvested" 2>/dev/null | tail -1)" = "$id2" ]; then
+            if is_harvested "$e"; then
                 [ "$quiet" = "1" ] || out+=$(printf "  %-22s %-9s %-10s %-9s harvested\n" "$e" "$st" "" "${s:0:7}")$'\n'
             else
                 anything=1
@@ -530,8 +591,8 @@ cmd_harvest() {
     local res_rel; res_rel=$(rel_to_repo "$AE_HOME/results")
     while read -r e; do
         [ -n "$e" ] || continue
-        local ident; ident="$(ledger_sha "$e" | cut -c1-7)-$(ledger_expsha "$e")"
-        if [ "$(cat "$AE_HOME/results/$e/.harvested" 2>/dev/null | tail -1)" = "$ident" ]; then continue; fi
+        local ident; ident=$(harvest_ident "$e")
+        if is_harvested "$e"; then continue; fi
         local j; j=$(ledger_job "$e")
         if ! valid_jobid "$j"; then
             echo "  $e: SKIPPED -- ledger has no usable jobid (got '$j'). Fix state/LEDGER.jsonl."
@@ -554,6 +615,18 @@ cmd_harvest() {
             continue
         fi
         mkdir -p "$AE_HOME/results/$e"
+        local prevnote=""
+        # A marker for another job means this is a re-harvest of a resubmission. Move the
+        # previous harvest aside, so old and new files never mix and the copy check below
+        # sees only what this harvest brought.
+        if [ -f "$AE_HOME/results/$e/.harvested" ]; then
+            local prev; prev=$(grep '^job=' "$AE_HOME/results/$e/.harvested" | tail -1 | cut -d= -f2)
+            prev="$AE_HOME/results/$e/.prev-${prev:-legacy}-$(date -u +%Y%m%dT%H%M%SZ)"
+            mkdir -p "$prev"
+            find "$AE_HOME/results/$e" -mindepth 1 -maxdepth 1 ! -name '.prev-*' -exec mv {} "$prev/" \;
+            info "$e: previous harvest moved to results/$e/$(basename "$prev")/"
+            prevnote="  previous=$res_rel/$e/$(basename "$prev")/"
+        fi
         rsync -aq -e ssh "$AE_HOST:$RROOT/results/$e/$ident/" "$AE_HOME/results/$e/" 2>/dev/null || true
         rsh "tail -n 40 $RROOT/out/${j}_ae-$e.out 2>/dev/null" > "$AE_HOME/results/$e/tail.log" || true
         # The generated script is the COMPLETE recipe (preamble + phases); bring it
@@ -569,14 +642,23 @@ cmd_harvest() {
             echo "     Re-run 'ae harvest $e'. If it persists, check: rsync -e ssh $AE_HOST:$RROOT/results/$e/"
             continue
         fi
-        { date -u +%FT%TZ; echo "$ident"; } > "$AE_HOME/results/$e/.harvested"
-        printf -- '- %s  **%s**  %s  sha=%s  results=%s/%s/\n' \
-            "$(date -u +%F)" "$e" "$st" "$(ledger_sha "$e")" "$res_rel" "$e" >> "$STATE/FINDINGS.md"
+        { date -u +%FT%TZ; echo "$ident"; echo "job=$j"; } > "$AE_HOME/results/$e/.harvested"
+        printf -- '- %s  **%s**  %s  sha=%s  job=%s  results=%s/%s/%s\n' \
+            "$(date -u +%F)" "$e" "$st" "$(ledger_sha "$e")" "$j" "$res_rel" "$e" "$prevnote" >> "$STATE/FINDINGS.md"
         echo "  harvested $e ($st, ${kb}KB, $n_remote artefact(s)) -> results/$e/  [FINDINGS.md updated]"
     done <<< "$targets"
 }
 
 # --- tinkering -------------------------------------------------------------
+# inv/<id> must exist on the remote before a tinker starts: the compute-side worktree
+# is created from $AE_REMOTE/inv/<id>. Create it from $AE_BRANCH when it is missing.
+ensure_inv_branch() {
+    local id="$1"
+    git_repo show-ref --verify --quiet "refs/heads/inv/$id" \
+        || git_repo branch "inv/$id" "$AE_BRANCH" || die "cannot create branch inv/$id from $AE_BRANCH"
+    git_repo ls-remote --exit-code "$AE_REMOTE" "refs/heads/inv/$id" >/dev/null 2>&1 \
+        || git_repo push -q "$AE_REMOTE" "inv/$id:inv/$id" || die "cannot push inv/$id to $AE_REMOTE"
+}
 cmd_investigate() {
     load_config; require_branch
     local id="$1"; shift
@@ -604,28 +686,44 @@ render_permissions() {   # -> path of a rendered copy
 
 cmd_launch() {
     load_config; ensure_link
-    local id="" j="" tier="$AE_DBG_CPU_NAME"
+    local id="" j="" tier="$AE_DBG_CPU_NAME" ptier="cpu" topup=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            --jobid) j="$2"; shift 2;;
-            --gpu)   tier="$AE_DBG_NAME,$AE_DBG_GEN_NAME"; shift;;   # either GPU pool
-            --gen)   tier="$AE_DBG_GEN_NAME"; shift;;                  # force the second pool
-            --preempt) tier="$AE_DBG_NAME"; shift;;
+            --jobid) [ $# -ge 2 ] && valid_jobid "$2" || die "--jobid needs a numeric job id"
+                     j="$2"; shift 2;;
+            --gpu)   tier="$AE_DBG_NAME,$AE_DBG_GEN_NAME"; ptier="gpu"; shift;;   # either GPU pool
+            --gen)   tier="$AE_DBG_GEN_NAME"; ptier="gen"; shift;;                  # force the second pool
+            --preempt) tier="$AE_DBG_NAME"; ptier="gpu"; shift;;
+            --topup) topup=1; shift;;
             *)       id="$1"; shift;;
         esac
     done
+    [ -n "$id" ] || die "usage: ae launch <id> [--gpu|--gen|--preempt] [--jobid J] [--topup]"
     local brief="$AE_HOME/inv/$id/brief.md"
     [ -f "$brief" ] || die "no brief at $brief (run: ae investigate $id)"
+    # templates/inv.md placeholder: never start a tinker on an unedited brief.
+    grep -qF '<What must be TRUE when this is done' "$brief" \
+        && die "brief $brief is still the unedited template; write the brief first"
     # Default: the OLDEST running standby (safest under youngest_first preemption).
     # --jobid reuses an allocation you already hold instead of waiting.
     [ -n "$j" ] || j=$(oldest_dbg "$tier")
-    if [ -z "$j" ]; then
-        info "no RUNNING standby in tier '$tier' -- topping up the pool"
-        cmd_pool >/dev/null 2>&1
+    # No silent submission: a standby counts against the project's GPU budget. Only
+    # --topup submits, and only in the requested tier.
+    if [ -z "$j" ] && [ "$topup" = "1" ]; then
+        local psize=0
+        case "$ptier" in cpu) psize=$AE_DBG_CPU_POOL;; gpu) psize=$AE_DBG_POOL;;
+                         gen) has_gen && psize=$AE_DBG_GEN_POOL;; esac
+        [ "${psize:-0}" -gt 0 ] || die "--topup: tier '$ptier' has pool size 0 (set its AE_DBG_*_POOL in config.sh, or run: ae pool $ptier)"
+        info "no RUNNING standby in tier '$tier' -- filling tier '$ptier' only (up to its configured pool size)"
+        cmd_pool "$ptier" >/dev/null 2>&1
         j=$(oldest_dbg "$tier")
+        [ -n "$j" ] || die "tier '$ptier' filled to its pool size, but no standby is RUNNING yet. Retry when one starts:
+    ae launch $id   (see: ae status)"
     fi
-    [ -n "$j" ] || die "no RUNNING standby in tier '$tier' (submitted more; they need to schedule).
-    Retry shortly, or reuse an allocation you already hold: ae launch $id --jobid <JOBID>"
+    [ -n "$j" ] || die "no RUNNING standby in tier '$tier'.
+    Reuse an allocation you hold: ae launch $id --jobid <JOBID>
+    or start one: ae pool $ptier   (or: ae launch $id --topup)"
+    ensure_inv_branch "$id"
 
     local perms; perms=$(render_permissions)
     local agentf; agentf=$(mktemp); printf '%s\n' "$AE_AGENT_CMD" > "$agentf"
@@ -696,12 +794,27 @@ cmd_wait() {
 cmd_tinker() {
     # One-shot: create the branch, take the brief on stdin, launch.
     local id="$1"; shift
-    local tierflag=""
-    case "${1:-}" in --gpu|--gen|--preempt) tierflag="$1"; shift;; esac
+    local lflags=()
+    while [ $# -gt 0 ]; do
+        case "$1" in --gpu|--gen|--preempt|--topup) lflags+=("$1"); shift;;
+                     --jobid) [ $# -ge 2 ] && valid_jobid "$2" || die "--jobid needs a numeric job id"
+                              lflags+=("$1" "$2"); shift 2;;
+                     *) break;; esac
+    done
+    # Read stdin completely BEFORE writing the brief: stdin may be inv/<id>/brief.md
+    # itself, and `cat > brief.md` would truncate it before it is read.
+    local tmpb; tmpb=$(mktemp)
+    if [ ! -t 0 ]; then cat > "$tmpb"; fi
+    # No brief on stdin: launch only on a brief that already existed (written by you),
+    # never on the template that `ae investigate` creates.
+    local had=0; [ -s "$AE_HOME/inv/$id/brief.md" ] && had=1
+    if [ ! -s "$tmpb" ] && [ "$had" = "0" ]; then
+        rm -f "$tmpb"; die "empty brief; pipe one in:  ae tinker $id < brief.md"
+    fi
     cmd_investigate "$id" "$@" >/dev/null
-    if [ ! -t 0 ]; then cat > "$AE_HOME/inv/$id/brief.md"; fi
-    [ -s "$AE_HOME/inv/$id/brief.md" ] || die "empty brief; pipe one in:  ae tinker $id < brief.md"
-    cmd_launch "$id" $tierflag
+    if [ -s "$tmpb" ]; then cp "$tmpb" "$AE_HOME/inv/$id/brief.md"; fi
+    rm -f "$tmpb"
+    cmd_launch "$id" ${lflags[@]+"${lflags[@]}"}
 }
 
 cmd_prune() {
@@ -716,8 +829,7 @@ cmd_prune() {
     while read -r e; do
         [ -n "$e" ] || continue
         if echo "$live" | grep -qx "ae-$e"; then keep="$keep $e(live)"; continue; fi
-        local id3; id3="$(ledger_sha "$e" | cut -c1-7)-$(ledger_expsha "$e")"
-        [ "$(cat "$AE_HOME/results/$e/.harvested" 2>/dev/null | tail -1)" = "$id3" ] || { keep="$keep $e(unharvested)"; continue; }
+        is_harvested "$e" || { keep="$keep $e(unharvested)"; continue; }
     done <<< "$(ledger_exps)"
     echo "== pinned worktrees under $RROOT/code =="
     local dirs; dirs=$(rsh "ls -1 $RROOT/code 2>/dev/null")
@@ -765,13 +877,18 @@ EXPERIMENTS
   ae harvest [expid]             pull distillates back; appends to state/FINDINGS.md
   ae wait <expid> [secs]         bounded poll until it leaves the queue (default 600s)
   ae cancel <expid>
+  ae slurm <squeue|sacct|sinfo|sprio|sstat|show> [args]      read-only Slurm queries (args quoted)
+  ae slurm <cancel|hold|release|requeue|requeuehold> <jobid>...   only this project's jobs
+  ae slurm update <jobid> Partition=..|QOS=..|ExcNodeList=..|Dependency=..|...
   ae prune [--yes]               reclaim pinned worktrees of finished+harvested runs
 
 TINKERING
-  ae tinker <id> [--gpu|--gen|--preempt] < brief.md
+  ae tinker <id> [--gpu|--gen|--preempt] [--jobid J] [--topup] < brief.md
                                  ONE STEP: branch + brief + launch agent
   ae investigate <id> [question] create branch inv/<id> + a brief to edit
-  ae launch <id> [--gpu] [--jobid J]   start a compute-side agent on the brief
+  ae launch <id> [--gpu|--gen] [--jobid J] [--topup]
+                                 start a compute-side agent on a RUNNING standby;
+                                 --topup submits a standby in that tier if none runs
   ae report <id>                 read its report + commits
   ae accept <id>                 squash-merge into the authoritative branch
 
@@ -799,6 +916,7 @@ case "${1:-help}" in
     accept) shift; cmd_accept "$@";;
     prune) shift; cmd_prune "$@";;
     wait) shift; cmd_wait "$@";;
+    slurm) shift; cmd_slurm "$@";;
     tinker) shift; cmd_tinker "$@";;
     help|-h|--help) cmd_help;;
     *) die "unknown command '$1' (try: ae help)";;

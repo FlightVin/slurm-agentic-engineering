@@ -47,6 +47,18 @@
 #   All three exist because each silently turned a failure into a pass in a real
 #   run. If a command in your phase is allowed to fail, write `cmd || true`.
 
+# Two traps that each broke a real run:
+#   - Inside a DOUBLE-quoted phase string, write \$var, \$? and \${PIPESTATUS[0]}. Unescaped,
+#     they expand when the phase is DEFINED (often to empty), not when it runs.
+#   - A trainer that saves a checkpoint on $AE_PREEMPT_FLAG and exits makes the job end
+#     FAILED, and Slurm never requeues a finished job. Requeue it from the phase:
+#       phase train "test -f \$RUN/RUN_COMPLETE" "
+#           rc=0; python train.py ... || rc=\$?     # '|| rc=' keeps bash -e from exiting first
+#           if [ \$rc -eq 143 ]; then scontrol requeue \$SLURM_JOB_ID; sleep 900; fi
+#           [ \$rc -eq 0 ] && touch \$RUN/RUN_COMPLETE
+#           exit \$rc
+#       "
+
 export PROJ_DATA="${PROJ_DATA:-/data/user_data/$USER/<project>}"   # from PROJECT.md "Data and paths"
 
 phase example "test -f $AE_RESULTS/summary.json" "

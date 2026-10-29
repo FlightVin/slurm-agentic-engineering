@@ -64,6 +64,8 @@ AE_DBG_GEN_GPUS=1
 AE_DBG_GEN_CPUS=4
 AE_DBG_GEN_TIME="2-00:00:00"         # general MaxTime: a standby is worth the full wall
 AE_DBG_GEN_POOL=2
+# Nodes no standby may use (comma list), e.g. a node with a known GPU driver fault.
+# AE_DBG_EXCLUDE="babel-p9-28"
 
 # --- quota guards (sacctmgr show qos preempt_qos) -------------------------
 AE_MAX_GPUS_PER_USER=24              # MaxTRESPU gres/gpu on preempt_qos

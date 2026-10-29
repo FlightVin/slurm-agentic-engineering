@@ -23,12 +23,16 @@ done
 python3 -m py_compile "$H/scripts/reset_project.py" && ok "py_compile reset_project.py" || bad "py_compile"
 
 echo "== entry points (no config)"
+# The harness dir may already hold a workspace (the default layout). Compare its
+# top-level listing before and after, rather than assume it has no workspace.
+snap() { ls -A "$H" | sort; }
+before=$(snap)
 out=$("$AE" help 2>&1); expect "ae help exits 0 and lists commands" '[ $? -eq 0 ] && grep -q "SETUP / HEALTH" <<<"$out"'
 out=$("$AE" paths 2>&1); expect "ae paths resolves workspace + repo" 'grep -q "workspace (AE_HOME): $W" <<<"$out" && grep -q "project repo (REPO): $P" <<<"$out" && grep -q MISSING <<<"$out"'
 out=$("$AE" status 2>&1); rc=$?; expect "ae status refuses without config" '[ $rc -ne 0 ] && grep -q "no site config" <<<"$out"'
 out=$("$AE" bogus 2>&1); rc=$?; expect "unknown command fails" '[ $rc -ne 0 ] && grep -q "unknown command" <<<"$out"'
 out=$("$H/bin/ae-watch" --once 2>&1); rc=$?; expect "ae-watch refuses without config" '[ $rc -eq 2 ]'
-expect "harness dir untouched by offline commands" '[ ! -e "$H/state" ] && [ ! -e "$H/config.sh" ]'
+expect "harness dir untouched by offline commands" '[ "$(snap)" = "$before" ]'
 
 echo "== init"
 out=$("$AE" init 2>&1); rc=$?; expect "ae init exits 0" '[ $rc -eq 0 ]'

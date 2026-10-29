@@ -45,7 +45,7 @@ Mechanics (facts, not advice):
   applies on both pools. On `general` it covers node failure and walltime chaining.
 
 ## Verified on this account
-<!-- Filled by the first run (agent.md "First run", step 8); re-measure when conditions change.
+<!-- Filled by the first run (agent.md "First run", step 9); re-measure when conditions change.
      Record the date and the command for each value. -->
 | item | `preempt` | `general` | `preempt_cpu_qos` | how / date |
 |---|---|---|---|---|
@@ -71,8 +71,10 @@ Mechanics (facts, not advice):
 - A held job with reason `launch_failed_requeued_held` pends forever; `ae pool` releases it.
 
 ## Traps NOT handled by `ae` (verified 2026-10-20/21 — re-verify)
-- **`srun` is refused on `preempt`** ("Only `sbatch` jobs are allowed"). On `general`,
+- **A new `srun` allocation is refused on `preempt`** ("Only `sbatch` jobs are allowed"). On `general`,
   `srun --jobid=<running job> --overlap -n1 <cmd>` works for quick checks inside a held allocation.
+  `ae launch` uses the same `--overlap` form inside a standby; check it once on a `preempt` standby
+  before relying on the CPU or preempt-GPU tier for tinkers.
 - **The login node's view of `/home` lags compute-node writes** (minutes). To read fresh compute
   output, read it from a compute node: `srun --jobid=<j> --overlap -n1 tar -C <dir> -cf - . | tar -xf -`.
 - **`squeue %m` shows `MinMemoryTRES`, not the requested memory**; check `scontrol show job` `ReqTRES`.
@@ -112,6 +114,11 @@ Mechanics (facts, not advice):
   babel-s5-24, babel-o9-32. Fail fast in a precheck when any allocated GPU has > 2 GB in use.
 - **babel-m5-32**: 4-GPU job crawled in collectives (2026-10-01). **babel-v9-20**: "CUDA unknown
   error" for every process from 2026-10-09.
+- **babel-p9-28 (L40S)**: GPU driver hang on 2026-10-22 (process in D state, `nvidia-smi` did not
+  return); Slurm drained it. Exclude it until re-checked.
+- **CPU instruction sets differ between GPU nodes.** babel-n9-24 (L40S) and babel-w5-24 (L40) lack
+  `avx512f`; robomimic tool-hang initial states differed there (2026-10-22, 2026-10-28). For
+  bit-exact reproduction, set `constraint=avx512f` on every partition.
 - Health-check a fresh standby with `torch.zeros(1).cuda()` before launching an agent on it.
 - Pending jobs take `scontrol update JobId=X ExcNodeList=...`; running jobs cannot.
 

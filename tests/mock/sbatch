@@ -3,6 +3,9 @@
 S="$MOCK_SLURM"; mkdir -p "$S"; script=""; parsable=0
 for x in "$@"; do case "$x" in --test-only) exit 1;; --parsable) parsable=1;; -*) ;; *) script="$x";; esac; done
 id=$(( $(cat "$S/next" 2>/dev/null || echo 1000) + 1 )); echo $id > "$S/next"
+echo "$*" >> "$S/sbatch-args"
+# A standby never ends; record it as submitted (squeue reports nothing) without running it.
+case "$script" in */standby.sh) echo "$id|standby|PENDING|0:0" >> "$S/jobs"; [ $parsable = 1 ] && echo $id; exit 0;; esac
 name=$(grep -m1 '^#SBATCH -J ' "$script" | awk '{print $3}')
 qos=$(grep -m1 '^#SBATCH -q ' "$script" | awk '{print $3}'); part=$(grep -m1 '^#SBATCH -p ' "$script" | awk '{print $3}')
 outp=$(grep -m1 '^#SBATCH -o ' "$script" | awk '{print $3}' | sed "s/%j/$id/")

@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-# MOCK scontrol: no-op
-exit 0
+# MOCK scontrol: records its arguments.
+echo "scontrol $*" >> "${MOCK_SLURM:-/tmp}/ctl-calls"
