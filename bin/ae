@@ -40,7 +40,10 @@ load_config() {
     : "${AE_DBG_CPU_NAME:=ae-dbg-cpu}" "${AE_DBG_CPU_CPUS:=4}" "${AE_DBG_CPU_TIME:=12:00:00}" "${AE_DBG_CPU_POOL:=2}"
     : "${AE_DBG_GEN_NAME:=ae-dbg-gen}" "${AE_DBG_GEN_GPUS:=1}" "${AE_DBG_GEN_CPUS:=4}" "${AE_DBG_GEN_TIME:=24:00:00}" "${AE_DBG_GEN_POOL:=0}"
     : "${AE_MAX_GPUS_PER_USER:=0}" "${AE_MAX_SUBMIT:=100}" "${AE_HARVEST_MAX_KB:=2048}"
-    : "${AE_DBG_EXCLUDE:=}"
+    : "${AE_DBG_EXCLUDE:=}" "${AE_INV_PREFIX:=inv}"
+    # Tinker branches are $AE_INV_PREFIX/<id>. Change the prefix when another agent works in the
+    # same git remote, so branch names cannot collide. Local and remote brief dirs stay inv/<id>.
+    case "$AE_INV_PREFIX" in ''|*[!A-Za-z0-9._-]*) die "config.sh: AE_INV_PREFIX must be a plain name (got '$AE_INV_PREFIX')";; esac
     : "${AE_AGENT_CMD:=claude --permission-mode acceptEdits}"
     local v
     for v in AE_HOST AE_REMOTE_REPO AE_BRANCH AE_PARTITION AE_QOS_GPU AE_QOS_CPU; do
@@ -552,7 +555,7 @@ cmd_status() {
     if [ "$quiet" = "1" ] && [ "$anything" = "0" ]; then echo "no change"; return 0; fi
     echo "== experiments =="; [ -n "$out" ] && printf "%s" "$out" || echo "  (none)"
     echo "== standby =="; cmd_standby_list
-    local inv; inv=$(git_repo branch -a --list "*inv/*" --format='%(refname:short)' 2>/dev/null | sed "s#^$AE_REMOTE/##" | sort -u)
+    local inv; inv=$(git_repo branch -a --list "$AE_INV_PREFIX/*" "$AE_REMOTE/$AE_INV_PREFIX/*" --format='%(refname:short)' 2>/dev/null | sed "s#^$AE_REMOTE/##" | sort -u)
     [ -n "$inv" ] && { echo "== investigations =="; echo "$inv" | sed 's/^/  /'; }
     return 0
 }
@@ -650,14 +653,14 @@ cmd_harvest() {
 }
 
 # --- tinkering -------------------------------------------------------------
-# inv/<id> must exist on the remote before a tinker starts: the compute-side worktree
-# is created from $AE_REMOTE/inv/<id>. Create it from $AE_BRANCH when it is missing.
+# $AE_INV_PREFIX/<id> must exist on the remote before a tinker starts: the compute-side
+# worktree is created from it. Create it from $AE_BRANCH when it is missing.
 ensure_inv_branch() {
-    local id="$1"
-    git_repo show-ref --verify --quiet "refs/heads/inv/$id" \
-        || git_repo branch "inv/$id" "$AE_BRANCH" || die "cannot create branch inv/$id from $AE_BRANCH"
-    git_repo ls-remote --exit-code "$AE_REMOTE" "refs/heads/inv/$id" >/dev/null 2>&1 \
-        || git_repo push -q "$AE_REMOTE" "inv/$id:inv/$id" || die "cannot push inv/$id to $AE_REMOTE"
+    local id="$1" b="$AE_INV_PREFIX/$1"
+    git_repo show-ref --verify --quiet "refs/heads/$b" \
+        || git_repo branch "$b" "$AE_BRANCH" || die "cannot create branch $b from $AE_BRANCH"
+    git_repo ls-remote --exit-code "$AE_REMOTE" "refs/heads/$b" >/dev/null 2>&1 \
+        || git_repo push -q "$AE_REMOTE" "$b:$b" || die "cannot push $b to $AE_REMOTE"
 }
 cmd_investigate() {
     load_config; require_branch
@@ -667,12 +670,13 @@ cmd_investigate() {
         sed "s/{{ID}}/$id/g; s/{{QUESTION}}/${*:-<fill in>}/g" \
             "$AE_DIR/templates/inv.md" > "$brief_dir/brief.md"
     fi
-    git_repo show-ref --verify --quiet "refs/heads/inv/$id" \
-        || git_repo branch "inv/$id" "$AE_BRANCH"
-    git_repo push -q "$AE_REMOTE" "inv/$id:inv/$id" 2>/dev/null || true
+    local b="$AE_INV_PREFIX/$id"
+    git_repo show-ref --verify --quiet "refs/heads/$b" \
+        || git_repo branch "$b" "$AE_BRANCH"
+    git_repo push -q "$AE_REMOTE" "$b:$b" 2>/dev/null || true
     echo "investigation '$id'"
     echo "  brief:  $brief_dir/brief.md   <-- EDIT THIS, then: ae launch $id"
-    echo "  branch: inv/$id (pushed)"
+    echo "  branch: $b (pushed)"
 }
 
 # The tinker's least-privilege allowlist, rendered for THIS project: the deny list
@@ -743,8 +747,8 @@ cmd_launch() {
     rsh "set -e
          cd $RREPO && git fetch -q $AE_REMOTE
          W=$RROOT/work/$id
-         if [ ! -d \"\$W\" ]; then git worktree add -q \"\$W\" -B inv/$id $AE_REMOTE/inv/$id; fi
-         cd \"\$W\" && git fetch -q $AE_REMOTE && git reset -q --hard $AE_REMOTE/inv/$id
+         if [ ! -d \"\$W\" ]; then git worktree add -q \"\$W\" -B $AE_INV_PREFIX/$id $AE_REMOTE/$AE_INV_PREFIX/$id; fi
+         cd \"\$W\" && git fetch -q $AE_REMOTE && git reset -q --hard $AE_REMOTE/$AE_INV_PREFIX/$id
          echo \"  worktree \$W @ \$(git rev-parse --short HEAD)\""
 
     # srun --overlap puts the agent inside the standby allocation (its cgroup, its
@@ -756,24 +760,24 @@ cmd_launch() {
 
 cmd_report() {
     load_config; ensure_link; local id="$1"
-    echo "== report: inv/$id =="
+    echo "== report: $AE_INV_PREFIX/$id =="
     rsh "cat $RROOT/work/$id/.ae-report.md 2>/dev/null || echo '(agent has not written a report yet)'"
-    echo "== commits on inv/$id =="
-    git_repo fetch -q "$AE_REMOTE" "inv/$id:refs/remotes/$AE_REMOTE/inv/$id" 2>/dev/null || true
-    git_repo log --oneline "$AE_BRANCH..$AE_REMOTE/inv/$id" 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+    echo "== commits on $AE_INV_PREFIX/$id =="
+    git_repo fetch -q "$AE_REMOTE" "$AE_INV_PREFIX/$id:refs/remotes/$AE_REMOTE/$AE_INV_PREFIX/$id" 2>/dev/null || true
+    git_repo log --oneline "$AE_BRANCH..$AE_REMOTE/$AE_INV_PREFIX/$id" 2>/dev/null | sed 's/^/  /' || echo "  (none)"
 }
 
 cmd_accept() {
     load_config; require_branch; ensure_link; local id="$1"
-    git_repo fetch -q "$AE_REMOTE" "inv/$id:refs/remotes/$AE_REMOTE/inv/$id" || die "cannot fetch inv/$id"
-    local n; n=$(git_repo rev-list --count "$AE_BRANCH..$AE_REMOTE/inv/$id")
-    [ "$n" -gt 0 ] || die "inv/$id has no commits beyond $AE_BRANCH -- nothing to accept"
-    info "squash-merging $n commit(s) from inv/$id"
-    git_repo merge --squash "$AE_REMOTE/inv/$id" || die "merge conflict -- resolve, then: git commit"
-    git_repo commit -q -m "accept inv/$id" || die "nothing staged"
+    git_repo fetch -q "$AE_REMOTE" "$AE_INV_PREFIX/$id:refs/remotes/$AE_REMOTE/$AE_INV_PREFIX/$id" || die "cannot fetch $AE_INV_PREFIX/$id"
+    local n; n=$(git_repo rev-list --count "$AE_BRANCH..$AE_REMOTE/$AE_INV_PREFIX/$id")
+    [ "$n" -gt 0 ] || die "$AE_INV_PREFIX/$id has no commits beyond $AE_BRANCH -- nothing to accept"
+    info "squash-merging $n commit(s) from $AE_INV_PREFIX/$id"
+    git_repo merge --squash "$AE_REMOTE/$AE_INV_PREFIX/$id" || die "merge conflict -- resolve, then: git commit"
+    git_repo commit -q -m "accept $AE_INV_PREFIX/$id" || die "nothing staged"
     git_repo push -q "$AE_REMOTE" "HEAD:$AE_BRANCH" || die "push failed"
-    echo "accepted inv/$id -> $AE_BRANCH @ $(git_repo rev-parse --short HEAD)"
-    echo "  branch inv/$id kept as the archive (WIP history preserved there)"
+    echo "accepted $AE_INV_PREFIX/$id -> $AE_BRANCH @ $(git_repo rev-parse --short HEAD)"
+    echo "  branch $AE_INV_PREFIX/$id kept as the archive (WIP history preserved there)"
 }
 
 cmd_wait() {
@@ -885,7 +889,7 @@ EXPERIMENTS
 TINKERING
   ae tinker <id> [--gpu|--gen|--preempt] [--jobid J] [--topup] < brief.md
                                  ONE STEP: branch + brief + launch agent
-  ae investigate <id> [question] create branch inv/<id> + a brief to edit
+  ae investigate <id> [question] create branch $AE_INV_PREFIX/<id> (default inv/<id>) + a brief to edit
   ae launch <id> [--gpu|--gen] [--jobid J] [--topup]
                                  start a compute-side agent on a RUNNING standby;
                                  --topup submits a standby in that tier if none runs

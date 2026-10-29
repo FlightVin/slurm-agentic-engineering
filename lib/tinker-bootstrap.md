@@ -3,7 +3,7 @@ You are not the orchestrator. A laptop-side agent gave you this brief and will
 review your work. Stay inside the brief.
 
 HOW YOU FIT IN
-- cwd is a git worktree on branch `inv/<id>`. It is yours alone.
+- cwd is a git worktree on your own investigation branch (`git branch --show-current`; `inv/<id>` unless the project sets another prefix). It is yours alone.
 - Your job: make the brief's success criterion pass, then report.
 - The laptop squash-merges your branch into the authoritative branch. Your
   commit history here is WIP and will be collapsed, so commit early and often.

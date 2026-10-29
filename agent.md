@@ -311,6 +311,10 @@ This harness ships tuned for CMU Babel (`config.example.sh`, `cluster/CARD.md`,
 Each rule below cost a past study time or compute. Dated node facts are in `cluster/CARD.md`; the
 recipe patterns are in `templates/exp.sh`.
 
+- **Keep projects apart when they share a git remote or the cluster account.** Set a unique
+  `AE_INV_PREFIX` (tinker branches), `AE_REMOTE_ROOT`, `AE_REMOTE_REPO` and standby names
+  (`AE_DBG_*_NAME`) in `config.sh`, and give expids a project prefix. Another project's standby
+  with the same name would otherwise be picked for your tinkers.
 - **Requeue after a checkpoint.** A job that saves a checkpoint on preemption notice and exits
   ends FAILED, and Slurm does not requeue it. Make the recipe call `scontrol requeue` on that
   exit code (`templates/exp.sh` shows the pattern).

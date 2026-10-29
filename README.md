@@ -230,6 +230,7 @@ tinker briefs and agent logs (`inv/`). `ae report <id>` prints a tinker's report
 | `AE_REMOTE_ROOT` | no | `$HOME/ae` |
 | `AE_DEFAULT_TIME`, `AE_DEFAULT_CPUS` | no | `08:00:00`, 4 (Babel's own default walltime is 30 min) |
 | `AE_DBG_*` | no | standby: CPU ×2 (12 h), preempt GPU ×2 (24 h), general GPU ×2 (2 days) |
+| `AE_INV_PREFIX` | optional | tinker branch prefix (default `inv`); set a unique one when another agent shares the git remote |
 | `AE_DBG_EXCLUDE` | optional | nodes no standby may use, e.g. a node with a known GPU fault |
 | `AE_MAX_GPUS_PER_USER`, `AE_MAX_SUBMIT` | no | 24, 100 (`preempt_qos`) |
 | `AE_HARVEST_MAX_KB` | no | per-experiment harvest cap, 2048 |

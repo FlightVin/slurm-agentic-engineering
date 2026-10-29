@@ -149,6 +149,21 @@ out=$("$AE" launch t1 --gen --topup 2>&1); rc=$?
 expect "--topup on a tier with pool size 0 says so" '[ $rc -ne 0 ] && grep -q "pool size 0" <<<"$out"'
 sed -i.bak '/^AE_DBG_GEN_POOL=0$/d' "$WS/config.sh"
 
+echo "== tinker branch prefix (AE_INV_PREFIX)"
+echo 'AE_INV_PREFIX="dc-inv"' >> "$WS/config.sh"
+mkdir -p "$WS/inv/t6"; echo "# brief t6" > "$WS/inv/t6/brief.md"
+"$AE" launch t6 --jobid 4242 >/dev/null 2>&1
+expect "prefixed branch dc-inv/t6 pushed to origin" 'git -C "$T/origin.git" rev-parse --verify -q refs/heads/dc-inv/t6 >/dev/null'
+expect "no inv/t6 branch created" '! git -C "$T/origin.git" rev-parse --verify -q refs/heads/inv/t6 >/dev/null'
+expect "compute-side worktree is on dc-inv/t6" '[ "$(git -C "$MOCK_REMOTE_HOME/ae/work/t6" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "dc-inv/t6" ]'
+out=$("$AE" status 2>&1); expect "status lists dc-inv/ branches only" 'grep -q "dc-inv/t6" <<<"$out" && ! grep -qE "^  inv/" <<<"$out"'
+out=$("$AE" investigate t7 2>&1); expect "investigate creates dc-inv/t7" 'grep -q "branch: dc-inv/t7" <<<"$out" && git -C "$P" rev-parse --verify -q refs/heads/dc-inv/t7 >/dev/null'
+sed -i.bak '/^AE_INV_PREFIX="dc-inv"$/d' "$WS/config.sh"
+echo 'AE_INV_PREFIX="bad prefix;x"' >> "$WS/config.sh"
+out=$("$AE" status 2>&1); rc=$?; expect "an unsafe prefix is refused" '[ $rc -ne 0 ] && grep -q "AE_INV_PREFIX must be a plain name" <<<"$out"'
+sed -i.bak '/^AE_INV_PREFIX="bad prefix;x"$/d' "$WS/config.sh"
+out=$("$AE" status 2>&1); expect "default prefix lists inv/ branches" 'grep -qE "^  inv/t2" <<<"$out"'
+
 echo "== ae-watch (event watcher)"
 W="$P/slurm-agentic-engineering/bin/ae-watch"
 out=$("$W" --once 2>&1); rc=$?

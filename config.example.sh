@@ -75,6 +75,12 @@ AE_MAX_SUBMIT=100                    # MaxSubmitPU on preempt_qos (refused beyon
 AE_HARVEST_MAX_KB=2048               # per-experiment cap on what comes back to the laptop.
                                      # If a job wants more, fix the job to emit a summary.
 
+# --- sharing a git remote or cluster account with another agent ----------
+# Give each project its own names so nothing collides:
+# AE_INV_PREFIX="myproj-inv"        # tinker branches <prefix>/<id> (default inv/<id>)
+# AE_REMOTE_ROOT='$HOME/ae-myproj'  # its own ~/ae on the cluster (jobs, code, work, out, results)
+# AE_DBG_NAME, AE_DBG_CPU_NAME, AE_DBG_GEN_NAME: its own standby job names
+
 # --- tinkering agent ------------------------------------------------------
 # Command that runs the compute-side agent; the prompt is passed as its last argument.
 AE_AGENT_CMD="claude --permission-mode acceptEdits"
